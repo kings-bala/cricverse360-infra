@@ -35,7 +35,7 @@ function respond(statusCode, body) {
     headers: {
       "Content-Type": "application/json",
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Amz-Date,X-Api-Key",
+      "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-User-Email,X-User-Name",
       "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
     },
     body: JSON.stringify(body),
