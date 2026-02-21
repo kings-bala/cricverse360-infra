@@ -1,0 +1,26 @@
+{
+  "name": "cricverse360-infra",
+  "version": "1.0.0",
+  "bin": {
+    "infra": "bin/infra.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "synth": "cdk synth",
+    "deploy": "cdk deploy --require-approval never",
+    "destroy": "cdk destroy --force",
+    "infra:start": "bash scripts/start.sh",
+    "infra:stop": "bash scripts/stop.sh"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "aws-cdk": "^2.170.0",
+    "typescript": "~5.4.0"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.170.0",
+    "constructs": "^10.0.0",
+    "source-map-support": "^0.5.21",
+    "ts-node": "^10.9.2"
+  }
+}
