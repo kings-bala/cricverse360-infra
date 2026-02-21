@@ -383,6 +383,20 @@ async function handleAvatarUpload(event) {
   return respond(200, { uploadUrl: url, key });
 }
 
+async function handleVideoUpload(event, body) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const ext = body.extension || "mp4";
+  const contentType = body.contentType || "video/mp4";
+  const key = `videos/${user.sub || user.username}/${Date.now()}.${ext}`;
+  const url = await getSignedUrl(s3, new PutObjectCommand({
+    Bucket: BUCKET_NAME,
+    Key: key,
+    ContentType: contentType,
+  }), { expiresIn: 600 });
+  return respond(200, { uploadUrl: url, key });
+}
+
 async function handleGetStats(event) {
   const user = await getUserFromToken(event);
   if (!user) return respond(401, { error: "Unauthorized" });
@@ -862,6 +876,7 @@ export async function handler(event) {
     if (path === "/users/profile" && method === "GET") return await handleGetProfile(event);
     if (path === "/users/profile" && method === "PUT") return await handleUpdateProfile(event, body);
     if (path === "/users/avatar" && method === "POST") return await handleAvatarUpload(event);
+    if (path === "/users/video-upload" && method === "POST") return await handleVideoUpload(event, body);
 
     // Stats routes
     if (path === "/stats" && method === "GET") return await handleGetStats(event);
