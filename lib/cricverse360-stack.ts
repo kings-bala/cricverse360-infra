@@ -219,6 +219,8 @@ export class CricVerse360Stack extends cdk.Stack {
           "Authorization",
           "X-Amz-Date",
           "X-Api-Key",
+          "X-User-Email",
+          "X-User-Name",
         ],
         allowCredentials: true,
       },
