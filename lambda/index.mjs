@@ -801,7 +801,7 @@ async function handleAdminDashboard(event) {
 // ─── Main Router ───
 export async function handler(event) {
   const method = event.httpMethod;
-  const path = event.resource || event.path;
+  const path = event.path?.replace(/\/$/, '') || '/';
   let body = {};
   try {
     body = event.body ? JSON.parse(event.body) : {};
@@ -874,7 +874,7 @@ export async function handler(event) {
     if (path === "/admin/dashboard" && method === "GET") return await handleAdminDashboard(event);
 
     // Health check
-    if (path === "/" && method === "GET") {
+    if ((path === "/health" || path === "/" || path === "") && method === "GET") {
       return respond(200, { status: "ok", service: "CricVerse360 API", version: "1.0.0" });
     }
 
