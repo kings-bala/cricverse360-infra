@@ -70,18 +70,48 @@ function parseRows(result) {
 async function getUserFromToken(event) {
   const authHeader = event.headers?.Authorization || event.headers?.authorization || "";
   const token = authHeader.replace("Bearer ", "");
-  if (!token) return null;
-  try {
-    const cmd = new GetUserCommand({ AccessToken: token });
-    const user = await cognito.send(cmd);
-    const attrs = {};
-    for (const attr of user.UserAttributes || []) {
-      attrs[attr.Name] = attr.Value;
+
+  // Try Cognito token first
+  if (token) {
+    try {
+      const cmd = new GetUserCommand({ AccessToken: token });
+      const user = await cognito.send(cmd);
+      const attrs = {};
+      for (const attr of user.UserAttributes || []) {
+        attrs[attr.Name] = attr.Value;
+      }
+      return { username: user.Username, email: attrs.email || user.Username, ...attrs };
+    } catch {
+      // token invalid, fall through to email header
     }
-    return { username: user.Username, ...attrs };
-  } catch {
-    return null;
   }
+
+  // Demo mode: identify user by X-User-Email header
+  const emailHeader = event.headers?.["X-User-Email"] || event.headers?.["x-user-email"] || "";
+  if (emailHeader) {
+    // Auto-create user in DB if not exists
+    const existing = await runSql("SELECT id, email, full_name FROM users WHERE email = :email", [
+      { name: "email", value: { stringValue: emailHeader } },
+    ]);
+    const rows = parseRows(existing);
+    if (rows.length > 0) {
+      return { username: rows[0].email, email: rows[0].email, sub: rows[0].id, name: rows[0].full_name };
+    }
+    // Create new user from header info
+    const nameHeader = event.headers?.["X-User-Name"] || event.headers?.["x-user-name"] || emailHeader.split("@")[0];
+    const userId = crypto.randomUUID();
+    await runSql(
+      "INSERT INTO users (id, email, full_name, role) VALUES (:id, :email, :name, 'player') ON CONFLICT (email) DO NOTHING",
+      [
+        { name: "id", value: { stringValue: userId } },
+        { name: "email", value: { stringValue: emailHeader } },
+        { name: "name", value: { stringValue: nameHeader } },
+      ]
+    );
+    return { username: emailHeader, email: emailHeader, sub: userId, name: nameHeader };
+  }
+
+  return null;
 }
 
 async function initDb() {
