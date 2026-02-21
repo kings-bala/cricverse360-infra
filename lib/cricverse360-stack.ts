@@ -72,7 +72,7 @@ export class CricVerse360Stack extends cdk.Stack {
     // ─── Aurora Serverless v2 (PostgreSQL, scales to 0) ───
     const dbCluster = new rds.DatabaseCluster(this, "CricVerse360Db", {
       engine: rds.DatabaseClusterEngine.auroraPostgres({
-        version: rds.AuroraPostgresEngineVersion.VER_15_4,
+        version: rds.AuroraPostgresEngineVersion.VER_16_6,
       }),
       serverlessV2MinCapacity: 0,
       serverlessV2MaxCapacity: 1,
@@ -231,85 +231,12 @@ export class CricVerse360Stack extends cdk.Stack {
 
     const lambdaIntegration = new apigateway.LambdaIntegration(apiHandler);
 
-    // Auth routes
-    const auth = api.root.addResource("auth");
-    auth.addResource("register").addMethod("POST", lambdaIntegration);
-    auth.addResource("login").addMethod("POST", lambdaIntegration);
-    auth.addResource("verify").addMethod("POST", lambdaIntegration);
-    auth.addResource("forgot-password").addMethod("POST", lambdaIntegration);
-    auth.addResource("reset-password").addMethod("POST", lambdaIntegration);
-    auth.addResource("me").addMethod("GET", lambdaIntegration);
-
-    // User routes
-    const users = api.root.addResource("users");
-    const userProfile = users.addResource("profile");
-    userProfile.addMethod("GET", lambdaIntegration);
-    userProfile.addMethod("PUT", lambdaIntegration);
-    const userAvatar = users.addResource("avatar");
-    userAvatar.addMethod("POST", lambdaIntegration);
-
-    // Stats routes
-    const stats = api.root.addResource("stats");
-    stats.addMethod("GET", lambdaIntegration);
-    stats.addMethod("POST", lambdaIntegration);
-    const cricclubsSync = stats.addResource("cricclubs-sync");
-    cricclubsSync.addMethod("POST", lambdaIntegration);
-    const statsHistory = stats.addResource("history");
-    statsHistory.addMethod("GET", lambdaIntegration);
-
-    // Sessions routes
-    const sessions = api.root.addResource("sessions");
-    sessions.addMethod("GET", lambdaIntegration);
-    sessions.addMethod("POST", lambdaIntegration);
-    const sessionById = sessions.addResource("{sessionId}");
-    sessionById.addMethod("GET", lambdaIntegration);
-
-    // Analysis routes
-    const analysis = api.root.addResource("analysis");
-    analysis.addMethod("POST", lambdaIntegration);
-    const analysisHistory = analysis.addResource("history");
-    analysisHistory.addMethod("GET", lambdaIntegration);
-
-    // Idol routes
-    const idol = api.root.addResource("idol");
-    const idolSelections = idol.addResource("selections");
-    idolSelections.addMethod("GET", lambdaIntegration);
-    idolSelections.addMethod("POST", lambdaIntegration);
-    const idolProgress = idol.addResource("progress");
-    idolProgress.addMethod("GET", lambdaIntegration);
-    idolProgress.addMethod("POST", lambdaIntegration);
-
-    // Academy routes
-    const academy = api.root.addResource("academy");
-    academy.addMethod("GET", lambdaIntegration);
-    academy.addMethod("POST", lambdaIntegration);
-    const roster = academy.addResource("roster");
-    roster.addMethod("GET", lambdaIntegration);
-    roster.addMethod("POST", lambdaIntegration);
-    const attendance = academy.addResource("attendance");
-    attendance.addMethod("GET", lambdaIntegration);
-    attendance.addMethod("POST", lambdaIntegration);
-    const staff = academy.addResource("staff");
-    staff.addMethod("GET", lambdaIntegration);
-    staff.addMethod("POST", lambdaIntegration);
-    const invite = academy.addResource("invite");
-    invite.addMethod("POST", lambdaIntegration);
-    const reports = academy.addResource("reports");
-    reports.addMethod("GET", lambdaIntegration);
-
-    // Admin routes
-    const admin = api.root.addResource("admin");
-    const adminUsers = admin.addResource("users");
-    adminUsers.addMethod("GET", lambdaIntegration);
-    const adminUserById = adminUsers.addResource("{userId}");
-    const adminBlock = adminUserById.addResource("block");
-    adminBlock.addMethod("PUT", lambdaIntegration);
-    const adminRole = adminUserById.addResource("role");
-    adminRole.addMethod("PUT", lambdaIntegration);
-    const auditLog = admin.addResource("audit-log");
-    auditLog.addMethod("GET", lambdaIntegration);
-    const adminDashboard = admin.addResource("dashboard");
-    adminDashboard.addMethod("GET", lambdaIntegration);
+    // Proxy integration: single {proxy+} catches all routes (avoids Lambda policy size limit)
+    api.root.addMethod("ANY", lambdaIntegration);
+    api.root.addProxy({
+      defaultIntegration: lambdaIntegration,
+      anyMethod: true,
+    });
 
     // ─── Outputs ───
     new cdk.CfnOutput(this, "ApiUrl", {
