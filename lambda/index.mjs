@@ -16,6 +16,9 @@ import {
 import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import crypto from "crypto";
+import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
 
 const region = process.env.REGION || "us-east-1";
 const rds = new RDSDataClient({ region });
@@ -204,9 +207,58 @@ async function initDb() {
       details JSONB DEFAULT '{}',
       created_at TIMESTAMP DEFAULT NOW()
     )`,
+    `CREATE TABLE IF NOT EXISTS catalog (
+      category TEXT PRIMARY KEY,
+      data JSONB NOT NULL,
+      updated_at TIMESTAMP DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS academy_fee_settings (
+      id TEXT PRIMARY KEY,
+      academy_id TEXT NOT NULL UNIQUE,
+      settings JSONB NOT NULL,
+      updated_at TIMESTAMP DEFAULT NOW()
+    )`,
   ];
   for (const sql of tables) {
     await runSql(sql);
+  }
+}
+
+let catalogSeeded = false;
+async function seedCatalog() {
+  if (catalogSeeded) return;
+  const check = await runSql("SELECT COUNT(*) as count FROM catalog");
+  const rows = parseRows(check);
+  if (parseInt(rows[0]?.count || "0", 10) > 0) { catalogSeeded = true; return; }
+  try {
+    const __dirname = dirname(fileURLToPath(import.meta.url));
+    const raw = readFileSync(join(__dirname, "seed", "catalog.json"), "utf8");
+    const seed = JSON.parse(raw);
+    const categories = [
+      ["players", seed.players],
+      ["agents", seed.agents],
+      ["teams", seed.t20Teams],
+      ["leagues", seed.t20Leagues],
+      ["tournaments", seed.tournaments],
+      ["sponsors", seed.sponsors],
+      ["available_sponsorships", seed.availableSponsorships],
+      ["coaches", seed.coaches],
+      ["match_history", seed.playerMatchHistory],
+      ["combine_data", seed.playerCombineData],
+      ["performance_feed", seed.performanceFeedItems],
+    ];
+    for (const [cat, data] of categories) {
+      await runSql(
+        "INSERT INTO catalog (category, data) VALUES (:cat, :data::jsonb) ON CONFLICT (category) DO NOTHING",
+        [
+          { name: "cat", value: { stringValue: cat } },
+          { name: "data", value: { stringValue: JSON.stringify(data) } },
+        ]
+      );
+    }
+    catalogSeeded = true;
+  } catch (e) {
+    console.error("seedCatalog error:", e);
   }
 }
 
@@ -842,6 +894,79 @@ async function handleAdminDashboard(event) {
   });
 }
 
+// ─── Catalog Route Handlers ───
+
+async function handleGetCatalog(category) {
+  await seedCatalog();
+  const result = await runSql("SELECT data FROM catalog WHERE category = :cat", [
+    { name: "cat", value: { stringValue: category } },
+  ]);
+  const rows = parseRows(result);
+  if (!rows.length) return respond(404, { error: "Category not found" });
+  return respond(200, JSON.parse(rows[0].data));
+}
+
+async function handleGetFeeSettings(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const academy = await runSql(
+    "SELECT id FROM academies WHERE owner_id = (SELECT id FROM users WHERE email = :email) LIMIT 1",
+    [{ name: "email", value: { stringValue: user.email } }]
+  );
+  const academyRows = parseRows(academy);
+  if (!academyRows.length) return respond(404, { error: "No academy found" });
+  const academyId = academyRows[0].id;
+  const result = await runSql(
+    "SELECT settings FROM academy_fee_settings WHERE academy_id = :aid ORDER BY updated_at DESC LIMIT 1",
+    [{ name: "aid", value: { stringValue: academyId } }]
+  );
+  const rows = parseRows(result);
+  if (!rows.length) return respond(200, {});
+  return respond(200, JSON.parse(rows[0].settings));
+}
+
+async function handlePutFeeSettings(event, body) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const academy = await runSql(
+    "SELECT id FROM academies WHERE owner_id = (SELECT id FROM users WHERE email = :email) LIMIT 1",
+    [{ name: "email", value: { stringValue: user.email } }]
+  );
+  const academyRows = parseRows(academy);
+  if (!academyRows.length) return respond(404, { error: "No academy found" });
+  const academyId = academyRows[0].id;
+  const id = crypto.randomUUID();
+  await runSql(
+    `INSERT INTO academy_fee_settings (id, academy_id, settings, updated_at)
+     VALUES (:id, :aid, :settings::jsonb, NOW())
+     ON CONFLICT (academy_id) DO UPDATE SET settings = EXCLUDED.settings, updated_at = NOW()`,
+    [
+      { name: "id", value: { stringValue: id } },
+      { name: "aid", value: { stringValue: academyId } },
+      { name: "settings", value: { stringValue: JSON.stringify(body) } },
+    ]
+  );
+  return respond(200, { message: "Fee settings saved" });
+}
+
+async function handleSendReminder(event, body) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const { studentId, studentName, feeType, amount } = body;
+  if (!studentId || !feeType) return respond(400, { error: "studentId and feeType are required" });
+  const auditId = crypto.randomUUID();
+  await runSql(
+    "INSERT INTO audit_log (id, admin_id, action, target_id, details) VALUES (:id, :admin, 'send_reminder', :target, :details::jsonb)",
+    [
+      { name: "id", value: { stringValue: auditId } },
+      { name: "admin", value: { stringValue: user.email } },
+      { name: "target", value: { stringValue: studentId } },
+      { name: "details", value: { stringValue: JSON.stringify({ studentName, feeType, amount }) } },
+    ]
+  );
+  return respond(200, { message: `Reminder sent to ${studentName || studentId}` });
+}
+
 // ─── Main Router ───
 export async function handler(event) {
   const method = event.httpMethod;
@@ -862,6 +987,9 @@ export async function handler(event) {
       console.error("DB init error:", err);
     }
   }
+
+  // Handle OPTIONS preflight
+  if (method === "OPTIONS") return respond(200, {});
 
   try {
     // Auth routes
@@ -917,6 +1045,19 @@ export async function handler(event) {
     if (path === "/admin/users/{userId}/role" && method === "PUT") return await handleAdminChangeRole(event, body);
     if (path === "/admin/audit-log" && method === "GET") return await handleAuditLog(event);
     if (path === "/admin/dashboard" && method === "GET") return await handleAdminDashboard(event);
+
+    // Catalog routes
+    if (path.startsWith("/catalog/") && method === "GET") {
+      const category = path.replace("/catalog/", "").replace(/-/g, "_");
+      return await handleGetCatalog(category);
+    }
+
+    // Fee settings routes
+    if (path === "/academy/fee-settings" && method === "GET") return await handleGetFeeSettings(event);
+    if (path === "/academy/fee-settings" && method === "PUT") return await handlePutFeeSettings(event, body);
+
+    // Payments routes
+    if (path === "/payments/send-reminder" && method === "POST") return await handleSendReminder(event, body);
 
     // Health check
     if ((path === "/health" || path === "/" || path === "") && method === "GET") {
