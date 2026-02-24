@@ -33,17 +33,6 @@ export class CricVerse360Stack extends cdk.Stack {
       ],
     });
 
-    // VPC Endpoints for Lambda in isolated subnets to reach AWS services
-    vpc.addInterfaceEndpoint("SecretsManagerEndpoint", {
-      service: ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
-      subnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
-    });
-
-    vpc.addInterfaceEndpoint("RdsDataEndpoint", {
-      service: ec2.InterfaceVpcEndpointAwsService.RDS_DATA,
-      subnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
-    });
-
     // ─── Security Groups ───
     const dbSecurityGroup = new ec2.SecurityGroup(this, "DbSecurityGroup", {
       vpc,
@@ -164,10 +153,7 @@ export class CricVerse360Stack extends cdk.Stack {
       code: lambda.Code.fromAsset(path.join(__dirname, "../lambda")),
       memorySize: 256,
       timeout: cdk.Duration.seconds(30),
-      vpc,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
-      securityGroups: [lambdaSecurityGroup],
-      environment: {
+      environment:{
         DB_CLUSTER_ARN: dbCluster.clusterArn,
         DB_SECRET_ARN: dbCluster.secret?.secretArn || "",
         DB_NAME: "cricverse360",
