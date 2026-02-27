@@ -698,6 +698,9 @@ async function testFeedRoutes() {
 async function testEnergyRoutes() {
   console.log("\n--- Energy / Leaderboard Routes (NEW) ---");
 
+  // Reset test user back to player (was promoted to admin in admin tests)
+  await api("PUT", "/users/profile", { role: "player" }, null, { "X-User-Email": TEST_EMAIL });
+
   await test("GET /energy/me — get my energy", async () => {
     const res = await api("GET", "/energy/me", null, null, { "X-User-Email": TEST_EMAIL });
     assert(res.status === 200, `Expected 200, got ${res.status}`);

@@ -293,6 +293,20 @@ async function initDb() {
   for (const sql of tables) {
     await runSql(sql);
   }
+  const migrations = [
+    "DROP TABLE IF EXISTS badges CASCADE",
+    `CREATE TABLE IF NOT EXISTS badges (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      badge_type TEXT NOT NULL DEFAULT '',
+      badge_name TEXT NOT NULL DEFAULT '',
+      awarded_by TEXT DEFAULT '',
+      awarded_at TIMESTAMP DEFAULT NOW()
+    )`,
+  ];
+  for (const m of migrations) {
+    try { await runSql(m); } catch(e) { /* migration may fail if already applied */ }
+  }
 }
 
 let catalogSeeded = false;
@@ -1078,7 +1092,7 @@ async function handleCreateFeedPost(event, body) {
 async function handleLikeFeedPost(event) {
   const user = await getUserFromToken(event);
   if (!user) return respond(401, { error: "Unauthorized" });
-  const postId = event.pathParameters?.postId || event.path.split("/").pop();
+  const postId = event.pathParameters?.postId || event.path.split("/")[3];
   const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
     { name: "email", value: { stringValue: user.email } },
   ]);
@@ -1157,12 +1171,12 @@ async function handleGetPostComments(event) {
 async function handleDeleteFeedPost(event) {
   const user = await getUserFromToken(event);
   if (!user) return respond(401, { error: "Unauthorized" });
-  const postId = event.pathParameters?.postId || event.path.split("/").pop();
+  const postId = event.pathParameters?.postId || event.path.split("/")[3];
   const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
     { name: "email", value: { stringValue: user.email } },
   ]);
   const userId = parseRows(userRow)[0]?.id;
-  const post = await runSql("SELECT author_id FROM feed_posts WHERE id = :pid", [
+  const post = await runSql("SELECT author_id FROM feed_posts WHERE id = :pid",[
     { name: "pid", value: { stringValue: postId } },
   ]);
   const postRow = parseRows(post)[0];
