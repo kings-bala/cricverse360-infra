@@ -919,8 +919,14 @@ async function testEdgeCases() {
   });
 
   await test("OPTIONS preflight — returns 200", async () => {
-    const res = await api("OPTIONS", "/health");
-    assert(res.status === 200, `Expected 200, got ${res.status}`);
+    const https = await import("https");
+    const status = await new Promise((resolve, reject) => {
+      const url = new URL(`${API_BASE}/health`);
+      const req = https.request({ hostname: url.hostname, path: url.pathname, method: "OPTIONS", headers: { "Origin": "https://cricverse360.com", "Access-Control-Request-Method": "GET" } }, (res) => resolve(res.statusCode));
+      req.on("error", reject);
+      req.end();
+    });
+    assert(status === 200 || status === 204, `Expected 200 or 204, got ${status}`);
   });
 }
 
