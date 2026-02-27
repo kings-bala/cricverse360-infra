@@ -218,6 +218,77 @@ async function initDb() {
       settings JSONB NOT NULL,
       updated_at TIMESTAMP DEFAULT NOW()
     )`,
+    `CREATE TABLE IF NOT EXISTS feed_posts (
+      id TEXT PRIMARY KEY,
+      author_id TEXT NOT NULL REFERENCES users(id),
+      content TEXT NOT NULL,
+      post_type TEXT DEFAULT 'general',
+      region TEXT DEFAULT 'all',
+      stats_snapshot JSONB DEFAULT '{}',
+      media_url TEXT DEFAULT '',
+      like_count INTEGER DEFAULT 0,
+      comment_count INTEGER DEFAULT 0,
+      share_count INTEGER DEFAULT 0,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS feed_comments (
+      id TEXT PRIMARY KEY,
+      post_id TEXT NOT NULL REFERENCES feed_posts(id) ON DELETE CASCADE,
+      author_id TEXT NOT NULL REFERENCES users(id),
+      content TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS feed_likes (
+      id TEXT PRIMARY KEY,
+      post_id TEXT NOT NULL REFERENCES feed_posts(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      created_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE(post_id, user_id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS energy_scores (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      total_points INTEGER DEFAULT 0,
+      weekly_points INTEGER DEFAULT 0,
+      level TEXT DEFAULT 'rookie',
+      streak_days INTEGER DEFAULT 0,
+      last_activity TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE(user_id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS badges (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      badge_type TEXT NOT NULL,
+      badge_name TEXT NOT NULL,
+      awarded_by TEXT DEFAULT '',
+      awarded_at TIMESTAMP DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS watchlists (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      player_id TEXT NOT NULL,
+      player_name TEXT DEFAULT '',
+      list_type TEXT DEFAULT 'watch',
+      notes TEXT DEFAULT '',
+      ranking INTEGER DEFAULT 0,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS match_strategies (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      match_name TEXT NOT NULL,
+      opponent TEXT DEFAULT '',
+      phase TEXT DEFAULT 'powerplay',
+      bowling_plan JSONB DEFAULT '{}',
+      batting_plan JSONB DEFAULT '{}',
+      field_positions JSONB DEFAULT '{}',
+      notes TEXT DEFAULT '',
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )`,
   ];
   for (const sql of tables) {
     await runSql(sql);
@@ -949,6 +1020,489 @@ async function handlePutFeeSettings(event, body) {
   return respond(200, { message: "Fee settings saved" });
 }
 
+// ─── Feed Route Handlers ───
+
+async function handleGetFeedPosts(event) {
+  const qs = event.queryStringParameters || {};
+  const region = qs.region || "all";
+  const postType = qs.type || "all";
+  const limit = Math.min(parseInt(qs.limit || "20", 10), 100);
+  const offset = parseInt(qs.offset || "0", 10);
+  let sql = "SELECT fp.*, u.full_name as author_name, u.avatar_url as author_avatar, u.role as author_role FROM feed_posts fp JOIN users u ON fp.author_id = u.id";
+  const conditions = [];
+  const params = [];
+  if (region !== "all") {
+    conditions.push("fp.region = :region");
+    params.push({ name: "region", value: { stringValue: region } });
+  }
+  if (postType !== "all") {
+    conditions.push("fp.post_type = :ptype");
+    params.push({ name: "ptype", value: { stringValue: postType } });
+  }
+  if (conditions.length > 0) sql += " WHERE " + conditions.join(" AND ");
+  sql += " ORDER BY fp.created_at DESC";
+  sql += ` LIMIT ${limit} OFFSET ${offset}`;
+  const result = await runSql(sql, params);
+  return respond(200, parseRows(result));
+}
+
+async function handleCreateFeedPost(event, body) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const { content, postType, region, statsSnapshot, mediaUrl } = body;
+  if (!content) return respond(400, { error: "content is required" });
+  const id = crypto.randomUUID();
+  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const userId = parseRows(userRow)[0]?.id;
+  if (!userId) return respond(404, { error: "User not found" });
+  await runSql(
+    `INSERT INTO feed_posts (id, author_id, content, post_type, region, stats_snapshot, media_url)
+     VALUES (:id, :uid, :content, :ptype, :region, :stats::jsonb, :media)`,
+    [
+      { name: "id", value: { stringValue: id } },
+      { name: "uid", value: { stringValue: userId } },
+      { name: "content", value: { stringValue: content } },
+      { name: "ptype", value: { stringValue: postType || "general" } },
+      { name: "region", value: { stringValue: region || "all" } },
+      { name: "stats", value: { stringValue: JSON.stringify(statsSnapshot || {}) } },
+      { name: "media", value: { stringValue: mediaUrl || "" } },
+    ]
+  );
+  // Award energy points for posting
+  await awardEnergy(userId, 5, "post_created");
+  return respond(201, { id, message: "Post created" });
+}
+
+async function handleLikeFeedPost(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const postId = event.pathParameters?.postId || event.path.split("/").pop();
+  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const userId = parseRows(userRow)[0]?.id;
+  if (!userId) return respond(404, { error: "User not found" });
+  const existing = await runSql(
+    "SELECT id FROM feed_likes WHERE post_id = :pid AND user_id = :uid",
+    [
+      { name: "pid", value: { stringValue: postId } },
+      { name: "uid", value: { stringValue: userId } },
+    ]
+  );
+  if (parseRows(existing).length > 0) {
+    await runSql("DELETE FROM feed_likes WHERE post_id = :pid AND user_id = :uid", [
+      { name: "pid", value: { stringValue: postId } },
+      { name: "uid", value: { stringValue: userId } },
+    ]);
+    await runSql("UPDATE feed_posts SET like_count = GREATEST(like_count - 1, 0), updated_at = NOW() WHERE id = :pid", [
+      { name: "pid", value: { stringValue: postId } },
+    ]);
+    return respond(200, { liked: false, message: "Like removed" });
+  }
+  const likeId = crypto.randomUUID();
+  await runSql(
+    "INSERT INTO feed_likes (id, post_id, user_id) VALUES (:id, :pid, :uid)",
+    [
+      { name: "id", value: { stringValue: likeId } },
+      { name: "pid", value: { stringValue: postId } },
+      { name: "uid", value: { stringValue: userId } },
+    ]
+  );
+  await runSql("UPDATE feed_posts SET like_count = like_count + 1, updated_at = NOW() WHERE id = :pid", [
+    { name: "pid", value: { stringValue: postId } },
+  ]);
+  await awardEnergy(userId, 1, "post_liked");
+  return respond(200, { liked: true, message: "Post liked" });
+}
+
+async function handleCommentOnPost(event, body) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const postId = event.pathParameters?.postId || event.path.split("/")[3];
+  const { content } = body;
+  if (!content) return respond(400, { error: "content is required" });
+  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const userId = parseRows(userRow)[0]?.id;
+  if (!userId) return respond(404, { error: "User not found" });
+  const id = crypto.randomUUID();
+  await runSql(
+    "INSERT INTO feed_comments (id, post_id, author_id, content) VALUES (:id, :pid, :uid, :content)",
+    [
+      { name: "id", value: { stringValue: id } },
+      { name: "pid", value: { stringValue: postId } },
+      { name: "uid", value: { stringValue: userId } },
+      { name: "content", value: { stringValue: content } },
+    ]
+  );
+  await runSql("UPDATE feed_posts SET comment_count = comment_count + 1, updated_at = NOW() WHERE id = :pid", [
+    { name: "pid", value: { stringValue: postId } },
+  ]);
+  await awardEnergy(userId, 2, "comment_added");
+  return respond(201, { id, message: "Comment added" });
+}
+
+async function handleGetPostComments(event) {
+  const postId = event.pathParameters?.postId || event.path.split("/")[3];
+  const result = await runSql(
+    "SELECT fc.*, u.full_name as author_name, u.avatar_url as author_avatar FROM feed_comments fc JOIN users u ON fc.author_id = u.id WHERE fc.post_id = :pid ORDER BY fc.created_at ASC",
+    [{ name: "pid", value: { stringValue: postId } }]
+  );
+  return respond(200, parseRows(result));
+}
+
+async function handleDeleteFeedPost(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const postId = event.pathParameters?.postId || event.path.split("/").pop();
+  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const userId = parseRows(userRow)[0]?.id;
+  const post = await runSql("SELECT author_id FROM feed_posts WHERE id = :pid", [
+    { name: "pid", value: { stringValue: postId } },
+  ]);
+  const postRow = parseRows(post)[0];
+  if (!postRow) return respond(404, { error: "Post not found" });
+  if (postRow.author_id !== userId) return respond(403, { error: "Not your post" });
+  await runSql("DELETE FROM feed_posts WHERE id = :pid", [
+    { name: "pid", value: { stringValue: postId } },
+  ]);
+  return respond(200, { message: "Post deleted" });
+}
+
+async function handleShareFeedPost(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const postId = event.pathParameters?.postId || event.path.split("/")[3];
+  await runSql("UPDATE feed_posts SET share_count = share_count + 1, updated_at = NOW() WHERE id = :pid", [
+    { name: "pid", value: { stringValue: postId } },
+  ]);
+  return respond(200, { message: "Post shared" });
+}
+
+// ─── Energy / Leaderboard Route Handlers ───
+
+async function awardEnergy(userId, points, reason) {
+  const existing = await runSql("SELECT id, total_points, weekly_points FROM energy_scores WHERE user_id = :uid", [
+    { name: "uid", value: { stringValue: userId } },
+  ]);
+  const rows = parseRows(existing);
+  if (rows.length > 0) {
+    await runSql(
+      "UPDATE energy_scores SET total_points = total_points + :pts, weekly_points = weekly_points + :pts, last_activity = NOW(), updated_at = NOW() WHERE user_id = :uid",
+      [
+        { name: "pts", value: { longValue: points } },
+        { name: "uid", value: { stringValue: userId } },
+      ]
+    );
+  } else {
+    const id = crypto.randomUUID();
+    await runSql(
+      "INSERT INTO energy_scores (id, user_id, total_points, weekly_points, last_activity) VALUES (:id, :uid, :pts, :pts, NOW())",
+      [
+        { name: "id", value: { stringValue: id } },
+        { name: "uid", value: { stringValue: userId } },
+        { name: "pts", value: { longValue: points } },
+      ]
+    );
+  }
+}
+
+async function handleGetLeaderboard(event) {
+  const qs = event.queryStringParameters || {};
+  const period = qs.period || "all";
+  const limit = Math.min(parseInt(qs.limit || "20", 10), 100);
+  const orderCol = period === "weekly" ? "es.weekly_points" : "es.total_points";
+  const result = await runSql(
+    `SELECT es.*, u.full_name, u.avatar_url, u.role,
+     (SELECT COUNT(*) FROM badges b WHERE b.user_id = es.user_id) as badge_count
+     FROM energy_scores es JOIN users u ON es.user_id = u.id
+     ORDER BY ${orderCol} DESC LIMIT ${limit}`
+  );
+  return respond(200, parseRows(result));
+}
+
+async function handleGetMyEnergy(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const userId = parseRows(userRow)[0]?.id;
+  if (!userId) return respond(404, { error: "User not found" });
+  const result = await runSql("SELECT * FROM energy_scores WHERE user_id = :uid", [
+    { name: "uid", value: { stringValue: userId } },
+  ]);
+  const rows = parseRows(result);
+  if (!rows.length) return respond(200, { total_points: 0, weekly_points: 0, level: "rookie", streak_days: 0 });
+  return respond(200, rows[0]);
+}
+
+async function handleGetMyBadges(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const userId = parseRows(userRow)[0]?.id;
+  if (!userId) return respond(404, { error: "User not found" });
+  const result = await runSql("SELECT * FROM badges WHERE user_id = :uid ORDER BY awarded_at DESC", [
+    { name: "uid", value: { stringValue: userId } },
+  ]);
+  return respond(200, parseRows(result));
+}
+
+async function handleAwardEnergy(event, body) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const dbUser = await runSql("SELECT id, role FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const dbRow = parseRows(dbUser)[0];
+  if (!dbRow || !['coach', 'academy_admin', 'admin', 'owner'].includes(dbRow.role)) {
+    return respond(403, { error: "Only coaches/admins can award energy" });
+  }
+  const { targetUserId, points, reason, badgeName } = body;
+  if (!targetUserId || !points) return respond(400, { error: "targetUserId and points are required" });
+  await awardEnergy(targetUserId, points, reason || "coach_award");
+  if (badgeName) {
+    const badgeId = crypto.randomUUID();
+    await runSql(
+      "INSERT INTO badges (id, user_id, badge_type, badge_name, awarded_by) VALUES (:id, :uid, :btype, :bname, :by)",
+      [
+        { name: "id", value: { stringValue: badgeId } },
+        { name: "uid", value: { stringValue: targetUserId } },
+        { name: "btype", value: { stringValue: reason || "coach_award" } },
+        { name: "bname", value: { stringValue: badgeName } },
+        { name: "by", value: { stringValue: dbRow.id } },
+      ]
+    );
+  }
+  return respond(200, { message: `Awarded ${points} CE to user`, badgeAwarded: !!badgeName });
+}
+
+// ─── Compare Route Handlers ───
+
+async function handleComparePlayers(event) {
+  const qs = event.queryStringParameters || {};
+  const ids = (qs.ids || "").split(",").filter(Boolean);
+  if (ids.length < 2) return respond(400, { error: "Provide at least 2 player IDs (comma-separated ids param)" });
+  const players = [];
+  for (const pid of ids.slice(0, 4)) {
+    const userResult = await runSql(
+      "SELECT id, full_name, email, role, avatar_url FROM users WHERE id = :id",
+      [{ name: "id", value: { stringValue: pid } }]
+    );
+    const userRows = parseRows(userResult);
+    if (!userRows.length) continue;
+    const statsResult = await runSql(
+      "SELECT stat_type, stat_data, source, recorded_at FROM player_stats WHERE user_id = :uid ORDER BY recorded_at DESC LIMIT 10",
+      [{ name: "uid", value: { stringValue: pid } }]
+    );
+    const energyResult = await runSql(
+      "SELECT total_points, weekly_points, level, streak_days FROM energy_scores WHERE user_id = :uid",
+      [{ name: "uid", value: { stringValue: pid } }]
+    );
+    const badgeResult = await runSql(
+      "SELECT badge_type, badge_name, awarded_at FROM badges WHERE user_id = :uid",
+      [{ name: "uid", value: { stringValue: pid } }]
+    );
+    players.push({
+      ...userRows[0],
+      stats: parseRows(statsResult),
+      energy: parseRows(energyResult)[0] || { total_points: 0, weekly_points: 0 },
+      badges: parseRows(badgeResult),
+    });
+  }
+  return respond(200, { players });
+}
+
+// ─── Selector / Watchlist Route Handlers ───
+
+async function handleGetWatchlist(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const qs = event.queryStringParameters || {};
+  const listType = qs.type || "watch";
+  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const userId = parseRows(userRow)[0]?.id;
+  if (!userId) return respond(404, { error: "User not found" });
+  const result = await runSql(
+    "SELECT * FROM watchlists WHERE user_id = :uid AND list_type = :lt ORDER BY ranking ASC, created_at DESC",
+    [
+      { name: "uid", value: { stringValue: userId } },
+      { name: "lt", value: { stringValue: listType } },
+    ]
+  );
+  return respond(200, parseRows(result));
+}
+
+async function handleAddToWatchlist(event, body) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const { playerId, playerName, listType, notes, ranking } = body;
+  if (!playerId) return respond(400, { error: "playerId is required" });
+  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const userId = parseRows(userRow)[0]?.id;
+  if (!userId) return respond(404, { error: "User not found" });
+  const id = crypto.randomUUID();
+  await runSql(
+    `INSERT INTO watchlists (id, user_id, player_id, player_name, list_type, notes, ranking)
+     VALUES (:id, :uid, :pid, :pname, :lt, :notes, :rank)`,
+    [
+      { name: "id", value: { stringValue: id } },
+      { name: "uid", value: { stringValue: userId } },
+      { name: "pid", value: { stringValue: playerId } },
+      { name: "pname", value: { stringValue: playerName || "" } },
+      { name: "lt", value: { stringValue: listType || "watch" } },
+      { name: "notes", value: { stringValue: notes || "" } },
+      { name: "rank", value: { longValue: ranking || 0 } },
+    ]
+  );
+  return respond(201, { id, message: "Added to watchlist" });
+}
+
+async function handleRemoveFromWatchlist(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const watchId = event.pathParameters?.watchId || event.path.split("/").pop();
+  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const userId = parseRows(userRow)[0]?.id;
+  const result = await runSql("DELETE FROM watchlists WHERE id = :wid AND user_id = :uid", [
+    { name: "wid", value: { stringValue: watchId } },
+    { name: "uid", value: { stringValue: userId } },
+  ]);
+  return respond(200, { message: "Removed from watchlist" });
+}
+
+async function handleUpdateWatchlistRanking(event, body) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const { rankings } = body;
+  if (!Array.isArray(rankings)) return respond(400, { error: "rankings array is required" });
+  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const userId = parseRows(userRow)[0]?.id;
+  for (const item of rankings) {
+    await runSql(
+      "UPDATE watchlists SET ranking = :rank, updated_at = NOW() WHERE id = :wid AND user_id = :uid",
+      [
+        { name: "rank", value: { longValue: item.ranking || 0 } },
+        { name: "wid", value: { stringValue: item.id } },
+        { name: "uid", value: { stringValue: userId } },
+      ]
+    );
+  }
+  return respond(200, { message: "Rankings updated" });
+}
+
+// ─── Strategy Route Handlers ───
+
+async function handleGetStrategies(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const userId = parseRows(userRow)[0]?.id;
+  if (!userId) return respond(404, { error: "User not found" });
+  const result = await runSql(
+    "SELECT * FROM match_strategies WHERE user_id = :uid ORDER BY updated_at DESC",
+    [{ name: "uid", value: { stringValue: userId } }]
+  );
+  return respond(200, parseRows(result));
+}
+
+async function handleCreateStrategy(event, body) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const { matchName, opponent, phase, bowlingPlan, battingPlan, fieldPositions, notes } = body;
+  if (!matchName) return respond(400, { error: "matchName is required" });
+  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const userId = parseRows(userRow)[0]?.id;
+  if (!userId) return respond(404, { error: "User not found" });
+  const id = crypto.randomUUID();
+  await runSql(
+    `INSERT INTO match_strategies (id, user_id, match_name, opponent, phase, bowling_plan, batting_plan, field_positions, notes)
+     VALUES (:id, :uid, :mname, :opp, :phase, :bowl::jsonb, :bat::jsonb, :field::jsonb, :notes)`,
+    [
+      { name: "id", value: { stringValue: id } },
+      { name: "uid", value: { stringValue: userId } },
+      { name: "mname", value: { stringValue: matchName } },
+      { name: "opp", value: { stringValue: opponent || "" } },
+      { name: "phase", value: { stringValue: phase || "powerplay" } },
+      { name: "bowl", value: { stringValue: JSON.stringify(bowlingPlan || {}) } },
+      { name: "bat", value: { stringValue: JSON.stringify(battingPlan || {}) } },
+      { name: "field", value: { stringValue: JSON.stringify(fieldPositions || {}) } },
+      { name: "notes", value: { stringValue: notes || "" } },
+    ]
+  );
+  return respond(201, { id, message: "Strategy created" });
+}
+
+async function handleUpdateStrategy(event, body) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const stratId = event.pathParameters?.strategyId || event.path.split("/").pop();
+  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const userId = parseRows(userRow)[0]?.id;
+  const { matchName, opponent, phase, bowlingPlan, battingPlan, fieldPositions, notes } = body;
+  await runSql(
+    `UPDATE match_strategies SET
+      match_name = COALESCE(:mname, match_name),
+      opponent = COALESCE(:opp, opponent),
+      phase = COALESCE(:phase, phase),
+      bowling_plan = COALESCE(:bowl::jsonb, bowling_plan),
+      batting_plan = COALESCE(:bat::jsonb, batting_plan),
+      field_positions = COALESCE(:field::jsonb, field_positions),
+      notes = COALESCE(:notes, notes),
+      updated_at = NOW()
+    WHERE id = :sid AND user_id = :uid`,
+    [
+      { name: "mname", value: matchName ? { stringValue: matchName } : { isNull: true } },
+      { name: "opp", value: opponent ? { stringValue: opponent } : { isNull: true } },
+      { name: "phase", value: phase ? { stringValue: phase } : { isNull: true } },
+      { name: "bowl", value: bowlingPlan ? { stringValue: JSON.stringify(bowlingPlan) } : { isNull: true } },
+      { name: "bat", value: battingPlan ? { stringValue: JSON.stringify(battingPlan) } : { isNull: true } },
+      { name: "field", value: fieldPositions ? { stringValue: JSON.stringify(fieldPositions) } : { isNull: true } },
+      { name: "notes", value: notes ? { stringValue: notes } : { isNull: true } },
+      { name: "sid", value: { stringValue: stratId } },
+      { name: "uid", value: { stringValue: userId } },
+    ]
+  );
+  return respond(200, { message: "Strategy updated" });
+}
+
+async function handleDeleteStrategy(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const stratId = event.pathParameters?.strategyId || event.path.split("/").pop();
+  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const userId = parseRows(userRow)[0]?.id;
+  await runSql("DELETE FROM match_strategies WHERE id = :sid AND user_id = :uid", [
+    { name: "sid", value: { stringValue: stratId } },
+    { name: "uid", value: { stringValue: userId } },
+  ]);
+  return respond(200, { message: "Strategy deleted" });
+}
+
 async function handleSendReminder(event, body) {
   const user = await getUserFromToken(event);
   if (!user) return respond(401, { error: "Unauthorized" });
@@ -1045,6 +1599,36 @@ export async function handler(event) {
     if (path === "/admin/users/{userId}/role" && method === "PUT") return await handleAdminChangeRole(event, body);
     if (path === "/admin/audit-log" && method === "GET") return await handleAuditLog(event);
     if (path === "/admin/dashboard" && method === "GET") return await handleAdminDashboard(event);
+
+    // Feed routes
+    if (path === "/feed/posts" && method === "GET") return await handleGetFeedPosts(event);
+    if (path === "/feed/posts" && method === "POST") return await handleCreateFeedPost(event, body);
+    if (path.match(/^\/feed\/posts\/[^/]+\/like$/) && method === "POST") return await handleLikeFeedPost(event);
+    if (path.match(/^\/feed\/posts\/[^/]+\/comments$/) && method === "POST") return await handleCommentOnPost(event, body);
+    if (path.match(/^\/feed\/posts\/[^/]+\/comments$/) && method === "GET") return await handleGetPostComments(event);
+    if (path.match(/^\/feed\/posts\/[^/]+\/share$/) && method === "POST") return await handleShareFeedPost(event);
+    if (path.match(/^\/feed\/posts\/[^/]+$/) && method === "DELETE") return await handleDeleteFeedPost(event);
+
+    // Energy / Leaderboard routes
+    if (path === "/energy/leaderboard" && method === "GET") return await handleGetLeaderboard(event);
+    if (path === "/energy/me" && method === "GET") return await handleGetMyEnergy(event);
+    if (path === "/energy/my-badges" && method === "GET") return await handleGetMyBadges(event);
+    if (path === "/energy/award" && method === "POST") return await handleAwardEnergy(event, body);
+
+    // Compare routes
+    if (path === "/compare/players" && method === "GET") return await handleComparePlayers(event);
+
+    // Selector / Watchlist routes
+    if (path === "/selector/watchlist" && method === "GET") return await handleGetWatchlist(event);
+    if (path === "/selector/watchlist" && method === "POST") return await handleAddToWatchlist(event, body);
+    if (path.match(/^\/selector\/watchlist\/[^/]+$/) && method === "DELETE") return await handleRemoveFromWatchlist(event);
+    if (path === "/selector/watchlist/rankings" && method === "PUT") return await handleUpdateWatchlistRanking(event, body);
+
+    // Strategy routes
+    if (path === "/strategy/plans" && method === "GET") return await handleGetStrategies(event);
+    if (path === "/strategy/plans" && method === "POST") return await handleCreateStrategy(event, body);
+    if (path.match(/^\/strategy\/plans\/[^/]+$/) && method === "PUT") return await handleUpdateStrategy(event, body);
+    if (path.match(/^\/strategy\/plans\/[^/]+$/) && method === "DELETE") return await handleDeleteStrategy(event);
 
     // Catalog routes
     if (path.startsWith("/catalog/") && method === "GET") {
