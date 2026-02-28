@@ -148,7 +148,7 @@ export class CricVerse360Stack extends cdk.Stack {
     // ─── Lambda Function (API handler) ───
     const apiHandler = new lambda.Function(this, "CricVerse360ApiHandler", {
       functionName: "cricverse360-api",
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.NODEJS_22_X,
       handler: "index.handler",
       code: lambda.Code.fromAsset(path.join(__dirname, "../lambda")),
       memorySize: 256,
