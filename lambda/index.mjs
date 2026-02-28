@@ -289,6 +289,40 @@ async function initDb() {
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
     )`,
+    `CREATE TABLE IF NOT EXISTS drills (
+      id TEXT PRIMARY KEY,
+      author_id TEXT NOT NULL REFERENCES users(id),
+      title TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      video_url TEXT DEFAULT '',
+      video_key TEXT DEFAULT '',
+      thumbnail_url TEXT DEFAULT '',
+      category TEXT DEFAULT 'batting',
+      skill_level TEXT DEFAULT 'beginner',
+      duration_minutes INTEGER DEFAULT 0,
+      tags JSONB DEFAULT '[]',
+      like_count INTEGER DEFAULT 0,
+      comment_count INTEGER DEFAULT 0,
+      share_count INTEGER DEFAULT 0,
+      visibility TEXT DEFAULT 'public',
+      academy_id TEXT DEFAULT '',
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS drill_likes (
+      id TEXT PRIMARY KEY,
+      drill_id TEXT NOT NULL REFERENCES drills(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      created_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE(drill_id, user_id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS drill_comments (
+      id TEXT PRIMARY KEY,
+      drill_id TEXT NOT NULL REFERENCES drills(id) ON DELETE CASCADE,
+      author_id TEXT NOT NULL REFERENCES users(id),
+      content TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
+    )`,
   ];
   for (const sql of tables) {
     await runSql(sql);
@@ -1535,6 +1569,247 @@ async function handleSendReminder(event, body) {
   return respond(200, { message: `Reminder sent to ${studentName || studentId}` });
 }
 
+// ─── Drill Handlers ───
+async function handleGetDrills(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const qs = event.queryStringParameters || {};
+  const category = qs.category || "";
+  const skillLevel = qs.skill_level || "";
+  const authorOnly = qs.mine === "true";
+  const academyId = qs.academy_id || "";
+  let sql = `SELECT d.*, u.full_name as author_name, u.avatar_url as author_avatar
+    FROM drills d JOIN users u ON d.author_id = u.id
+    WHERE d.visibility != 'deleted'`;
+  const params = [];
+  if (category) {
+    sql += " AND d.category = :cat";
+    params.push({ name: "cat", value: { stringValue: category } });
+  }
+  if (skillLevel) {
+    sql += " AND d.skill_level = :lvl";
+    params.push({ name: "lvl", value: { stringValue: skillLevel } });
+  }
+  if (authorOnly) {
+    sql += " AND u.email = :email";
+    params.push({ name: "email", value: { stringValue: user.email } });
+  }
+  if (academyId) {
+    sql += " AND d.academy_id = :aid";
+    params.push({ name: "aid", value: { stringValue: academyId } });
+  }
+  sql += " ORDER BY d.created_at DESC LIMIT 100";
+  const result = await runSql(sql, params);
+  return respond(200, parseRows(result));
+}
+
+async function handleCreateDrill(event, body) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const { title, description, videoUrl, videoKey, thumbnailUrl, category, skillLevel, durationMinutes, tags, visibility, academyId } = body;
+  if (!title) return respond(400, { error: "title is required" });
+  const id = crypto.randomUUID();
+  const userResult = await runSql("SELECT id FROM users WHERE email = :email", [{ name: "email", value: { stringValue: user.email } }]);
+  const userRows = parseRows(userResult);
+  if (userRows.length === 0) return respond(404, { error: "User not found" });
+  const authorId = userRows[0].id;
+  await runSql(
+    `INSERT INTO drills (id, author_id, title, description, video_url, video_key, thumbnail_url, category, skill_level, duration_minutes, tags, visibility, academy_id)
+     VALUES (:id, :author, :title, :desc, :vurl, :vkey, :thumb, :cat, :lvl, :dur, :tags::jsonb, :vis, :aid)`,
+    [
+      { name: "id", value: { stringValue: id } },
+      { name: "author", value: { stringValue: authorId } },
+      { name: "title", value: { stringValue: title } },
+      { name: "desc", value: { stringValue: description || "" } },
+      { name: "vurl", value: { stringValue: videoUrl || "" } },
+      { name: "vkey", value: { stringValue: videoKey || "" } },
+      { name: "thumb", value: { stringValue: thumbnailUrl || "" } },
+      { name: "cat", value: { stringValue: category || "batting" } },
+      { name: "lvl", value: { stringValue: skillLevel || "beginner" } },
+      { name: "dur", value: { longValue: durationMinutes || 0 } },
+      { name: "tags", value: { stringValue: JSON.stringify(tags || []) } },
+      { name: "vis", value: { stringValue: visibility || "public" } },
+      { name: "aid", value: { stringValue: academyId || "" } },
+    ]
+  );
+  return respond(201, { id, message: "Drill created" });
+}
+
+async function handleGetDrillById(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const drillId = event.path.split("/").pop();
+  const result = await runSql(
+    `SELECT d.*, u.full_name as author_name, u.avatar_url as author_avatar
+     FROM drills d JOIN users u ON d.author_id = u.id WHERE d.id = :id`,
+    [{ name: "id", value: { stringValue: drillId } }]
+  );
+  const rows = parseRows(result);
+  if (rows.length === 0) return respond(404, { error: "Drill not found" });
+  return respond(200, rows[0]);
+}
+
+async function handleUpdateDrill(event, body) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const drillId = event.path.split("/").filter(Boolean);
+  const id = drillId[drillId.length - 1];
+  const { title, description, videoUrl, category, skillLevel, durationMinutes, tags, visibility } = body;
+  await runSql(
+    `UPDATE drills SET title = COALESCE(:title, title), description = COALESCE(:desc, description),
+     video_url = COALESCE(:vurl, video_url), category = COALESCE(:cat, category),
+     skill_level = COALESCE(:lvl, skill_level), duration_minutes = COALESCE(:dur, duration_minutes),
+     tags = COALESCE(:tags::jsonb, tags), visibility = COALESCE(:vis, visibility), updated_at = NOW()
+     WHERE id = :id AND author_id = (SELECT id FROM users WHERE email = :email)`,
+    [
+      { name: "id", value: { stringValue: id } },
+      { name: "email", value: { stringValue: user.email } },
+      { name: "title", value: title ? { stringValue: title } : { isNull: true } },
+      { name: "desc", value: description ? { stringValue: description } : { isNull: true } },
+      { name: "vurl", value: videoUrl ? { stringValue: videoUrl } : { isNull: true } },
+      { name: "cat", value: category ? { stringValue: category } : { isNull: true } },
+      { name: "lvl", value: skillLevel ? { stringValue: skillLevel } : { isNull: true } },
+      { name: "dur", value: durationMinutes ? { longValue: durationMinutes } : { isNull: true } },
+      { name: "tags", value: tags ? { stringValue: JSON.stringify(tags) } : { isNull: true } },
+      { name: "vis", value: visibility ? { stringValue: visibility } : { isNull: true } },
+    ]
+  );
+  return respond(200, { message: "Drill updated" });
+}
+
+async function handleDeleteDrill(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const parts = event.path.split("/").filter(Boolean);
+  const id = parts[parts.length - 1];
+  await runSql(
+    "DELETE FROM drills WHERE id = :id AND author_id = (SELECT id FROM users WHERE email = :email)",
+    [
+      { name: "id", value: { stringValue: id } },
+      { name: "email", value: { stringValue: user.email } },
+    ]
+  );
+  return respond(200, { message: "Drill deleted" });
+}
+
+async function handleLikeDrill(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const parts = event.path.split("/").filter(Boolean);
+  const drillId = parts[parts.length - 2];
+  const userResult = await runSql("SELECT id FROM users WHERE email = :email", [{ name: "email", value: { stringValue: user.email } }]);
+  const userRows = parseRows(userResult);
+  if (userRows.length === 0) return respond(404, { error: "User not found" });
+  const userId = userRows[0].id;
+  const existing = await runSql(
+    "SELECT id FROM drill_likes WHERE drill_id = :did AND user_id = :uid",
+    [
+      { name: "did", value: { stringValue: drillId } },
+      { name: "uid", value: { stringValue: userId } },
+    ]
+  );
+  const existingRows = parseRows(existing);
+  if (existingRows.length > 0) {
+    await runSql("DELETE FROM drill_likes WHERE drill_id = :did AND user_id = :uid", [
+      { name: "did", value: { stringValue: drillId } },
+      { name: "uid", value: { stringValue: userId } },
+    ]);
+    await runSql("UPDATE drills SET like_count = GREATEST(like_count - 1, 0) WHERE id = :id", [{ name: "id", value: { stringValue: drillId } }]);
+    return respond(200, { message: "Unliked", liked: false });
+  }
+  const likeId = crypto.randomUUID();
+  await runSql(
+    "INSERT INTO drill_likes (id, drill_id, user_id) VALUES (:id, :did, :uid)",
+    [
+      { name: "id", value: { stringValue: likeId } },
+      { name: "did", value: { stringValue: drillId } },
+      { name: "uid", value: { stringValue: userId } },
+    ]
+  );
+  await runSql("UPDATE drills SET like_count = like_count + 1 WHERE id = :id", [{ name: "id", value: { stringValue: drillId } }]);
+  return respond(200, { message: "Liked", liked: true });
+}
+
+async function handleGetDrillComments(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const parts = event.path.split("/").filter(Boolean);
+  const drillId = parts[parts.length - 2];
+  const result = await runSql(
+    `SELECT dc.*, u.full_name as author_name, u.avatar_url as author_avatar
+     FROM drill_comments dc JOIN users u ON dc.author_id = u.id
+     WHERE dc.drill_id = :did ORDER BY dc.created_at ASC`,
+    [{ name: "did", value: { stringValue: drillId } }]
+  );
+  return respond(200, parseRows(result));
+}
+
+async function handleCommentOnDrill(event, body) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const parts = event.path.split("/").filter(Boolean);
+  const drillId = parts[parts.length - 2];
+  const { content } = body;
+  if (!content) return respond(400, { error: "content is required" });
+  const userResult = await runSql("SELECT id FROM users WHERE email = :email", [{ name: "email", value: { stringValue: user.email } }]);
+  const userRows = parseRows(userResult);
+  if (userRows.length === 0) return respond(404, { error: "User not found" });
+  const id = crypto.randomUUID();
+  await runSql(
+    "INSERT INTO drill_comments (id, drill_id, author_id, content) VALUES (:id, :did, :uid, :content)",
+    [
+      { name: "id", value: { stringValue: id } },
+      { name: "did", value: { stringValue: drillId } },
+      { name: "uid", value: { stringValue: userRows[0].id } },
+      { name: "content", value: { stringValue: content } },
+    ]
+  );
+  await runSql("UPDATE drills SET comment_count = comment_count + 1 WHERE id = :id", [{ name: "id", value: { stringValue: drillId } }]);
+  return respond(201, { id, message: "Comment added" });
+}
+
+async function handleShareDrill(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const parts = event.path.split("/").filter(Boolean);
+  const drillId = parts[parts.length - 2];
+  const drillResult = await runSql("SELECT * FROM drills WHERE id = :id", [{ name: "id", value: { stringValue: drillId } }]);
+  const drillRows = parseRows(drillResult);
+  if (drillRows.length === 0) return respond(404, { error: "Drill not found" });
+  const drill = drillRows[0];
+  const userResult = await runSql("SELECT id FROM users WHERE email = :email", [{ name: "email", value: { stringValue: user.email } }]);
+  const userRows = parseRows(userResult);
+  if (userRows.length === 0) return respond(404, { error: "User not found" });
+  const postId = crypto.randomUUID();
+  const postContent = `Shared a drill: ${drill.title}\n${drill.description || ""}`;
+  await runSql(
+    `INSERT INTO feed_posts (id, author_id, content, post_type, media_url)
+     VALUES (:id, :uid, :content, 'drill_share', :media)`,
+    [
+      { name: "id", value: { stringValue: postId } },
+      { name: "uid", value: { stringValue: userRows[0].id } },
+      { name: "content", value: { stringValue: postContent } },
+      { name: "media", value: { stringValue: drill.video_url || "" } },
+    ]
+  );
+  await runSql("UPDATE drills SET share_count = share_count + 1 WHERE id = :id", [{ name: "id", value: { stringValue: drillId } }]);
+  return respond(200, { message: "Drill shared to feed", postId });
+}
+
+async function handleDrillVideoUpload(event, body) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const ext = body.extension || "mp4";
+  const contentType = body.contentType || "video/mp4";
+  const key = `drills/${user.sub || user.username}/${Date.now()}.${ext}`;
+  const url = await getSignedUrl(s3, new PutObjectCommand({
+    Bucket: BUCKET_NAME,
+    Key: key,
+    ContentType: contentType,
+  }), { expiresIn: 600 });
+  return respond(200, { uploadUrl: url, key });
+}
+
 // ─── Main Router ───
 export async function handler(event) {
   const method = event.httpMethod;
@@ -1656,6 +1931,18 @@ export async function handler(event) {
 
     // Payments routes
     if (path === "/payments/send-reminder" && method === "POST") return await handleSendReminder(event, body);
+
+    // Drill routes
+    if (path === "/drills" && method === "GET") return await handleGetDrills(event);
+    if (path === "/drills" && method === "POST") return await handleCreateDrill(event, body);
+    if (path === "/drills/upload-url" && method === "POST") return await handleDrillVideoUpload(event, body);
+    if (path.match(/^\/drills\/[^/]+\/like$/) && method === "POST") return await handleLikeDrill(event);
+    if (path.match(/^\/drills\/[^/]+\/comments$/) && method === "GET") return await handleGetDrillComments(event);
+    if (path.match(/^\/drills\/[^/]+\/comments$/) && method === "POST") return await handleCommentOnDrill(event, body);
+    if (path.match(/^\/drills\/[^/]+\/share$/) && method === "POST") return await handleShareDrill(event);
+    if (path.match(/^\/drills\/[^/]+$/) && method === "GET") return await handleGetDrillById(event);
+    if (path.match(/^\/drills\/[^/]+$/) && method === "PUT") return await handleUpdateDrill(event, body);
+    if (path.match(/^\/drills\/[^/]+$/) && method === "DELETE") return await handleDeleteDrill(event);
 
     // Health check
     if ((path === "/health" || path === "/" || path === "") && method === "GET") {
