@@ -64,7 +64,7 @@ export class CricVerse360Stack extends cdk.Stack {
         version: rds.AuroraPostgresEngineVersion.VER_16_6,
       }),
       serverlessV2MinCapacity: 0,
-      serverlessV2MaxCapacity: 0.5,
+      serverlessV2MaxCapacity: 1,
       writer: rds.ClusterInstance.serverlessV2("writer", {
         publiclyAccessible: false,
       }),
