@@ -1925,9 +1925,9 @@ export async function handler(event) {
     if (path === "/academy/invite" && method === "POST") return await handleInvite(event, body);
     if (path === "/academy/reports" && method === "GET") return await handleAcademyReports(event);
 
-    // Admin DB control routes
-    if (path === "/admin/db/stop" && method === "POST") return await handleDbStop();
-    if (path === "/admin/db/start" && method === "POST") return await handleDbStart();
+    // Admin DB control routes (GET supported for easy browser access)
+    if (path === "/admin/db/stop" && (method === "POST" || method === "GET")) return await handleDbStop();
+    if (path === "/admin/db/start" && (method === "POST" || method === "GET")) return await handleDbStart();
     if (path === "/admin/db/status" && method === "GET") return await handleDbStatus();
 
     // Admin routes
