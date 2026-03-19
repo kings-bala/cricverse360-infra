@@ -1,4 +1,5 @@
 import { RDSDataClient, ExecuteStatementCommand } from "@aws-sdk/client-rds-data";
+import { RDSClient, StopDBClusterCommand, StartDBClusterCommand, DescribeDBClustersCommand } from "@aws-sdk/client-rds";
 import {
   CognitoIdentityProviderClient,
   SignUpCommand,
@@ -22,6 +23,7 @@ import { dirname, join } from "path";
 
 const region = process.env.REGION || "us-east-1";
 const rds = new RDSDataClient({ region });
+const rdsControl = new RDSClient({ region });
 const cognito = new CognitoIdentityProviderClient({ region });
 const s3 = new S3Client({ region });
 
@@ -31,6 +33,7 @@ const DB_NAME = process.env.DB_NAME;
 const USER_POOL_ID = process.env.USER_POOL_ID;
 const USER_POOL_CLIENT_ID = process.env.USER_POOL_CLIENT_ID;
 const BUCKET_NAME = process.env.BUCKET_NAME;
+const DB_CLUSTER_ID = process.env.DB_CLUSTER_ID;
 
 function respond(statusCode, body) {
   return {
@@ -1810,6 +1813,46 @@ async function handleDrillVideoUpload(event, body) {
   return respond(200, { uploadUrl: url, key });
 }
 
+// ─── DB Control Handlers ───
+async function handleDbStop() {
+  try {
+    await rdsControl.send(new StopDBClusterCommand({ DBClusterIdentifier: DB_CLUSTER_ID }));
+    return respond(200, { message: "Database cluster is stopping. It may take a few minutes." });
+  } catch (err) {
+    if (err.name === "InvalidDBClusterStateFault") {
+      return respond(409, { error: "Cluster is already stopped or in a transitional state." });
+    }
+    return respond(500, { error: err.message });
+  }
+}
+
+async function handleDbStart() {
+  try {
+    await rdsControl.send(new StartDBClusterCommand({ DBClusterIdentifier: DB_CLUSTER_ID }));
+    return respond(200, { message: "Database cluster is starting. It may take a few minutes." });
+  } catch (err) {
+    if (err.name === "InvalidDBClusterStateFault") {
+      return respond(409, { error: "Cluster is already running or in a transitional state." });
+    }
+    return respond(500, { error: err.message });
+  }
+}
+
+async function handleDbStatus() {
+  try {
+    const result = await rdsControl.send(new DescribeDBClustersCommand({ DBClusterIdentifier: DB_CLUSTER_ID }));
+    const cluster = result.DBClusters[0];
+    return respond(200, {
+      status: cluster.Status,
+      clusterIdentifier: cluster.DBClusterIdentifier,
+      engine: cluster.Engine,
+      engineVersion: cluster.EngineVersion,
+    });
+  } catch (err) {
+    return respond(500, { error: err.message });
+  }
+}
+
 // ─── Main Router ───
 export async function handler(event) {
   const method = event.httpMethod;
@@ -1881,6 +1924,11 @@ export async function handler(event) {
     if (path === "/academy/staff" && method === "POST") return await handlePostStaff(event, body);
     if (path === "/academy/invite" && method === "POST") return await handleInvite(event, body);
     if (path === "/academy/reports" && method === "GET") return await handleAcademyReports(event);
+
+    // Admin DB control routes
+    if (path === "/admin/db/stop" && method === "POST") return await handleDbStop();
+    if (path === "/admin/db/start" && method === "POST") return await handleDbStart();
+    if (path === "/admin/db/status" && method === "GET") return await handleDbStatus();
 
     // Admin routes
     if (path === "/admin/users" && method === "GET") return await handleAdminGetUsers(event);

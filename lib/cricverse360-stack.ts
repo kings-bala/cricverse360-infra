@@ -161,11 +161,23 @@ export class CricVerse360Stack extends cdk.Stack {
         USER_POOL_CLIENT_ID: userPoolClient.userPoolClientId,
         BUCKET_NAME: bucket.bucketName,
         REGION: this.region,
+        DB_CLUSTER_ID: dbCluster.clusterIdentifier,
       },
     });
 
     dbCluster.grantDataApiAccess(apiHandler);
     bucket.grantReadWrite(apiHandler);
+
+    apiHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          "rds:StopDBCluster",
+          "rds:StartDBCluster",
+          "rds:DescribeDBClusters",
+        ],
+        resources: [dbCluster.clusterArn],
+      })
+    );
 
     apiHandler.addToRolePolicy(
       new iam.PolicyStatement({
