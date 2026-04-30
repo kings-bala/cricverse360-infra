@@ -1070,13 +1070,37 @@ async function handleAdminDashboard(event) {
   const rows = parseRows(dbUser);
   if (!rows.length || rows[0].role !== "admin") return respond(403, { error: "Admin access required" });
 
-  const userCount = await runSql("SELECT COUNT(*) as count FROM users");
-  const sessionCount = await runSql("SELECT COUNT(*) as count FROM sessions");
-  const analysisCount = await runSql("SELECT COUNT(*) as count FROM analysis");
+  const [userCount, profileCount, videoCount, analysisCount, paidUsers, freeUsers, activeSubscriptions, coachRequests, failedVideos, recentUsers, recentAnalyses] = await Promise.all([
+    runSql("SELECT COUNT(*) as count FROM users"),
+    runSql("SELECT COUNT(*) as count FROM player_profiles"),
+    runSql("SELECT COUNT(*) as count FROM videos"),
+    runSql("SELECT COUNT(*) as count FROM analysis"),
+    runSql("SELECT COUNT(*) as count FROM subscriptions WHERE plan != 'free' AND status = 'active'"),
+    runSql("SELECT COUNT(*) as count FROM subscriptions WHERE plan = 'free'"),
+    runSql("SELECT COUNT(*) as count FROM subscriptions WHERE status = 'active' AND plan != 'free'"),
+    runSql("SELECT COUNT(*) as count FROM coach_requests WHERE status = 'pending'"),
+    runSql("SELECT COUNT(*) as count FROM videos WHERE status = 'failed'"),
+    runSql("SELECT id, email, name, role, created_at FROM users ORDER BY created_at DESC LIMIT 10"),
+    runSql("SELECT a.id, a.analysis_type, a.scores, a.created_at, u.email FROM analysis a JOIN users u ON a.user_id = u.id ORDER BY a.created_at DESC LIMIT 10"),
+  ]);
+
+  const totalUsers = parseInt(parseRows(userCount)[0]?.count || "0", 10);
+  const totalPaid = parseInt(parseRows(paidUsers)[0]?.count || "0", 10);
+  const totalFree = parseInt(parseRows(freeUsers)[0]?.count || "0", 10);
+
   return respond(200, {
-    totalUsers: parseRows(userCount)[0]?.count || 0,
-    totalSessions: parseRows(sessionCount)[0]?.count || 0,
-    totalAnalyses: parseRows(analysisCount)[0]?.count || 0,
+    totalUsers,
+    totalPlayerProfiles: parseInt(parseRows(profileCount)[0]?.count || "0", 10),
+    totalUploads: parseInt(parseRows(videoCount)[0]?.count || "0", 10),
+    totalAnalyses: parseInt(parseRows(analysisCount)[0]?.count || "0", 10),
+    paidUsers: totalPaid,
+    freeUsers: totalFree,
+    activeSubscriptions: parseInt(parseRows(activeSubscriptions)[0]?.count || "0", 10),
+    pendingCoachRequests: parseInt(parseRows(coachRequests)[0]?.count || "0", 10),
+    failedVideos: parseInt(parseRows(failedVideos)[0]?.count || "0", 10),
+    freeToConversion: totalUsers > 0 ? ((totalPaid / totalUsers) * 100).toFixed(1) + "%" : "0%",
+    recentUsers: parseRows(recentUsers),
+    recentAnalyses: parseRows(recentAnalyses),
   });
 }
 
@@ -2066,37 +2090,94 @@ async function handleAIAnalysis(event, body) {
 
   const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
   let analysisResult;
+  let usedGemini = false;
 
   if (GEMINI_API_KEY) {
     try {
-      // Get video from S3 and generate pre-signed URL for reference
+      // Download video from S3 for Gemini analysis
       const key = videoKey || "";
-      let videoUrl = "";
+      let videoParts = [];
       if (key) {
-        videoUrl = await getSignedUrl(s3, new GetObjectCommand({
-          Bucket: BUCKET_NAME,
-          Key: key,
-        }), { expiresIn: 600 });
+        try {
+          const s3Obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET_NAME, Key: key }));
+          const chunks = [];
+          for await (const chunk of s3Obj.Body) { chunks.push(chunk); }
+          const videoBuffer = Buffer.concat(chunks);
+          const videoBase64 = videoBuffer.toString("base64");
+          const mimeType = s3Obj.ContentType || "video/mp4";
+
+          // Upload to Gemini File API for large files (>20MB), inline for smaller
+          if (videoBuffer.length > 20 * 1024 * 1024) {
+            // Use File API for large videos
+            const uploadRes = await fetch(
+              `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${GEMINI_API_KEY}`,
+              {
+                method: "POST",
+                headers: {
+                  "X-Goog-Upload-Command": "upload, finalize",
+                  "X-Goog-Upload-Header-Content-Type": mimeType,
+                  "Content-Type": mimeType,
+                },
+                body: videoBuffer,
+              }
+            );
+            const uploadData = await uploadRes.json();
+            if (uploadData.file?.uri) {
+              videoParts = [{ fileData: { mimeType, fileUri: uploadData.file.uri } }];
+            }
+          } else {
+            videoParts = [{ inlineData: { mimeType, data: videoBase64 } }];
+          }
+        } catch (s3Err) {
+          console.error("S3 video download error:", s3Err);
+        }
       }
 
-      const prompt = `You are an expert cricket coach and biomechanics analyst. Analyze the cricket ${analysisType} video described below. Return ONLY valid JSON matching this exact structure (no markdown, no code fences, just raw JSON):
-{
-  "player_type": "batsman | bowler | all_rounder",
-  "analysis_type": "${analysisType}",
-  "overall_score": <number 0-100>,
-  "summary": "<2-3 sentence overview>",
-  "strengths": ["<strength1>", "<strength2>", "<strength3>"],
-  "weaknesses": ["<weakness1>", "<weakness2>"],
-  "technical_feedback": {
-    ${analysisType === "batting" ? '"stance": "<feedback>", "footwork": "<feedback>", "balance": "<feedback>", "timing": "<feedback>", "follow_through": "<feedback>"' : '"run_up": "<feedback>", "front_arm": "<feedback>", "bowling_arm": "<feedback>", "release": "<feedback>", "follow_through": "<feedback>"'}
-  },
-  "recommended_drills": [
-    {"name": "<drill name>", "purpose": "<why>", "instructions": "<how to do it>"}
-  ],
-  "next_steps": ["<step1>", "<step2>", "<step3>"]
-}
+      const prompt = `You are an expert cricket coach analyzing a cricket training video.
 
-The player has uploaded a cricket ${analysisType} session for analysis. ${videoUrl ? `Video reference: ${videoUrl}` : "Provide general analysis based on typical amateur cricket technique."} Please provide detailed, actionable feedback that will help the player improve.`;
+Analyze the uploaded video as a ${analysisType} video.
+
+Return JSON only using the required schema.
+
+Focus on practical coaching feedback for a developing cricket player.
+
+Evaluate only what is visible in the video. If the video angle, lighting, distance, or quality limits your confidence, clearly mention it and lower the confidence_score.
+
+Do not claim professional scouting certainty. Do not provide medical diagnosis.
+
+${analysisType === "batting" ? `For batting, evaluate: Stance, Head position, Footwork, Balance, Bat swing path, Shot timing, Follow-through, Body alignment.` : `For bowling, evaluate: Run-up rhythm, Front arm usage, Bowling arm path, Release position, Follow-through, Balance, Body alignment, Possible injury risk indicators.`}
+
+Provide:
+- overall_score from 0 to 100
+- confidence_score from 0 to 100
+- timestamp-based observations where possible
+- strengths (list)
+- weaknesses (list)
+- technical feedback for each area
+- recommended drills with name, purpose, and instructions
+- next_steps (list)
+
+Return valid JSON only matching this schema:
+{
+  "analysis_type": "${analysisType}",
+  "player_role_detected": "batsman | bowler | all_rounder | unknown",
+  "overall_score": 0,
+  "confidence_score": 0,
+  "summary": "",
+  "video_quality_notes": "",
+  "timestamp_observations": [{"timestamp": "00:03", "observation": "", "coaching_note": ""}],
+  "strengths": [],
+  "weaknesses": [],
+  "technical_feedback": {
+    "stance": "", "head_position": "", "footwork": "", "balance": "",
+    "bat_swing_or_bowling_arm": "", "timing_or_release": "", "follow_through": ""
+  },
+  "recommended_drills": [{"name": "", "purpose": "", "instructions": ""}],
+  "next_steps": [],
+  "disclaimer": "This AI analysis is for training guidance only and is not a professional scouting or medical assessment."
+}`;
+
+      const contentParts = [...videoParts, { text: prompt }];
 
       const geminiRes = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
@@ -2104,10 +2185,10 @@ The player has uploaded a cricket ${analysisType} session for analysis. ${videoU
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
+            contents: [{ parts: contentParts }],
             generationConfig: {
               temperature: 0.7,
-              maxOutputTokens: 2000,
+              maxOutputTokens: 4000,
               responseMimeType: "application/json",
             },
           }),
@@ -2116,9 +2197,11 @@ The player has uploaded a cricket ${analysisType} session for analysis. ${videoU
       const geminiData = await geminiRes.json();
       const content = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
       if (content) {
-        // Strip markdown code fences if present
         const cleaned = content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
         analysisResult = JSON.parse(cleaned);
+        usedGemini = true;
+      } else {
+        console.error("Gemini returned no content:", JSON.stringify(geminiData));
       }
     } catch (e) {
       console.error("Gemini analysis error:", e);
@@ -2129,6 +2212,12 @@ The player has uploaded a cricket ${analysisType} session for analysis. ${videoU
   if (!analysisResult) {
     analysisResult = generateFallbackAnalysis(analysisType);
   }
+
+  // Ensure required fields exist
+  if (!analysisResult.confidence_score) analysisResult.confidence_score = usedGemini ? 75 : 40;
+  if (!analysisResult.video_quality_notes) analysisResult.video_quality_notes = "";
+  if (!analysisResult.timestamp_observations) analysisResult.timestamp_observations = [];
+  if (!analysisResult.disclaimer) analysisResult.disclaimer = "This AI analysis is for training guidance only and is not a professional scouting or medical assessment.";
 
   // Save analysis
   const analysisId = crypto.randomUUID();
@@ -2168,7 +2257,7 @@ The player has uploaded a cricket ${analysisType} session for analysis. ${videoU
     ]);
   }
 
-  return respond(200, { analysisId, ...analysisResult, confidence: OPENAI_API_KEY ? "high" : "moderate" });
+  return respond(200, { analysisId, ...analysisResult, confidence: usedGemini ? "high" : "moderate" });
 }
 
 function generateFallbackAnalysis(analysisType) {
