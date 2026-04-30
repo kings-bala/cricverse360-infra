@@ -2064,10 +2064,10 @@ async function handleAIAnalysis(event, body) {
     { name: "id", value: { stringValue: videoId } },
   ]);
 
-  const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+  const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
   let analysisResult;
 
-  if (OPENAI_API_KEY) {
+  if (GEMINI_API_KEY) {
     try {
       // Get video from S3 and generate pre-signed URL for reference
       const key = videoKey || "";
@@ -2079,7 +2079,7 @@ async function handleAIAnalysis(event, body) {
         }), { expiresIn: 600 });
       }
 
-      const systemPrompt = `You are an expert cricket coach and biomechanics analyst. Analyze the cricket ${analysisType} video described below. Return ONLY valid JSON matching this exact structure:
+      const prompt = `You are an expert cricket coach and biomechanics analyst. Analyze the cricket ${analysisType} video described below. Return ONLY valid JSON matching this exact structure (no markdown, no code fences, just raw JSON):
 {
   "player_type": "batsman | bowler | all_rounder",
   "analysis_type": "${analysisType}",
@@ -2094,38 +2094,38 @@ async function handleAIAnalysis(event, body) {
     {"name": "<drill name>", "purpose": "<why>", "instructions": "<how to do it>"}
   ],
   "next_steps": ["<step1>", "<step2>", "<step3>"]
-}`;
+}
 
-      const userPrompt = `Analyze this ${analysisType} video. The player has uploaded a cricket ${analysisType} session for analysis. ${videoUrl ? `Video reference: ${videoUrl}` : "Provide general analysis based on typical amateur cricket technique."} Please provide detailed, actionable feedback that will help the player improve.`;
+The player has uploaded a cricket ${analysisType} session for analysis. ${videoUrl ? `Video reference: ${videoUrl}` : "Provide general analysis based on typical amateur cricket technique."} Please provide detailed, actionable feedback that will help the player improve.`;
 
-      const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: "gpt-4o",
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userPrompt },
-          ],
-          temperature: 0.7,
-          max_tokens: 2000,
-          response_format: { type: "json_object" },
-        }),
-      });
-      const openaiData = await openaiRes.json();
-      const content = openaiData.choices?.[0]?.message?.content;
+      const geminiRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: {
+              temperature: 0.7,
+              maxOutputTokens: 2000,
+              responseMimeType: "application/json",
+            },
+          }),
+        }
+      );
+      const geminiData = await geminiRes.json();
+      const content = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
       if (content) {
-        analysisResult = JSON.parse(content);
+        // Strip markdown code fences if present
+        const cleaned = content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+        analysisResult = JSON.parse(cleaned);
       }
     } catch (e) {
-      console.error("OpenAI analysis error:", e);
+      console.error("Gemini analysis error:", e);
     }
   }
 
-  // Fallback if OpenAI is unavailable or fails
+  // Fallback if Gemini is unavailable or fails
   if (!analysisResult) {
     analysisResult = generateFallbackAnalysis(analysisType);
   }
