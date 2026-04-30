@@ -152,7 +152,7 @@ export class CricVerse360Stack extends cdk.Stack {
       handler: "index.handler",
       code: lambda.Code.fromAsset(path.join(__dirname, "../lambda")),
       memorySize: 256,
-      timeout: cdk.Duration.seconds(30),
+      timeout: cdk.Duration.seconds(60),
       environment:{
         DB_CLUSTER_ARN: dbCluster.clusterArn,
         DB_SECRET_ARN: dbCluster.secret?.secretArn || "",
@@ -161,6 +161,12 @@ export class CricVerse360Stack extends cdk.Stack {
         USER_POOL_CLIENT_ID: userPoolClient.userPoolClientId,
         BUCKET_NAME: bucket.bucketName,
         REGION: this.region,
+        GEMINI_API_KEY: process.env.GEMINI_API_KEY || "",
+        STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY || "",
+        STRIPE_PRO_PRICE_ID: process.env.STRIPE_PRO_PRICE_ID || "",
+        STRIPE_PRO_PLUS_PRICE_ID: process.env.STRIPE_PRO_PLUS_PRICE_ID || "",
+        STRIPE_ONE_TIME_PRICE_ID: process.env.STRIPE_ONE_TIME_PRICE_ID || "",
+        STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET || "",
       },
     });
 
