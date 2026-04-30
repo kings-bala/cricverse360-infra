@@ -1877,6 +1877,165 @@ async function handleDrillVideoUpload(event, body) {
   return respond(200, { uploadUrl: url, key });
 }
 
+// ─── Stripe Integration ───
+async function handleCreateCheckout(event, body) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+
+  const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+  if (!STRIPE_SECRET_KEY) return respond(500, { error: "Stripe not configured" });
+
+  const { plan, successUrl, cancelUrl } = body;
+  if (!plan) return respond(400, { error: "plan is required" });
+
+  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const userId = parseRows(userRow)[0]?.id;
+  if (!userId) return respond(404, { error: "User not found" });
+
+  // Get or create Stripe customer
+  let sub = await runSql("SELECT stripe_customer_id FROM subscriptions WHERE user_id = :uid", [
+    { name: "uid", value: { stringValue: userId } },
+  ]);
+  let customerId = parseRows(sub)[0]?.stripe_customer_id;
+
+  if (!customerId) {
+    const custRes = await fetch("https://api.stripe.com/v1/customers", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${STRIPE_SECRET_KEY}`, "Content-Type": "application/x-www-form-urlencoded" },
+      body: `email=${encodeURIComponent(user.email)}&metadata[user_id]=${encodeURIComponent(userId)}`,
+    });
+    const cust = await custRes.json();
+    customerId = cust.id;
+    await runSql("UPDATE subscriptions SET stripe_customer_id = :cid WHERE user_id = :uid", [
+      { name: "cid", value: { stringValue: customerId } },
+      { name: "uid", value: { stringValue: userId } },
+    ]);
+  }
+
+  // Price lookup
+  const prices = {
+    pro: process.env.STRIPE_PRO_PRICE_ID || "",
+    pro_plus: process.env.STRIPE_PRO_PLUS_PRICE_ID || "",
+    one_time: process.env.STRIPE_ONE_TIME_PRICE_ID || "",
+  };
+
+  const priceId = prices[plan];
+  if (!priceId) return respond(400, { error: "Invalid plan" });
+
+  const isOneTime = plan === "one_time";
+  const params = new URLSearchParams({
+    "customer": customerId,
+    "success_url": successUrl || "https://cricverse360.com/pricing?success=true",
+    "cancel_url": cancelUrl || "https://cricverse360.com/pricing?cancelled=true",
+    "mode": isOneTime ? "payment" : "subscription",
+    "line_items[0][price]": priceId,
+    "line_items[0][quantity]": "1",
+    "metadata[user_id]": userId,
+    "metadata[plan]": plan,
+  });
+
+  const sessionRes = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${STRIPE_SECRET_KEY}`, "Content-Type": "application/x-www-form-urlencoded" },
+    body: params.toString(),
+  });
+  const session = await sessionRes.json();
+  return respond(200, { url: session.url, sessionId: session.id });
+}
+
+async function handleStripeWebhook(event) {
+  const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+  const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!STRIPE_SECRET_KEY) return respond(500, { error: "Stripe not configured" });
+
+  const rawBody = event.body || "";
+  const sig = event.headers?.["stripe-signature"] || event.headers?.["Stripe-Signature"] || "";
+
+  // Verify webhook signature if secret is configured
+  let evt;
+  if (STRIPE_WEBHOOK_SECRET && sig) {
+    try {
+      const parts = sig.split(",").reduce((acc, p) => {
+        const [k, v] = p.split("=");
+        acc[k.trim()] = v;
+        return acc;
+      }, {});
+      const timestamp = parts.t;
+      const signedPayload = `${timestamp}.${rawBody}`;
+      const expected = parts.v1;
+      const hmac = crypto.createHmac("sha256", STRIPE_WEBHOOK_SECRET).update(signedPayload).digest("hex");
+      if (hmac !== expected) return respond(400, { error: "Invalid signature" });
+      evt = JSON.parse(rawBody);
+    } catch (e) {
+      return respond(400, { error: "Webhook verification failed" });
+    }
+  } else {
+    try { evt = JSON.parse(rawBody); } catch { return respond(400, { error: "Invalid JSON" }); }
+  }
+
+  const type = evt.type;
+  const data = evt.data?.object;
+
+  if (type === "checkout.session.completed") {
+    const userId = data.metadata?.user_id;
+    const plan = data.metadata?.plan;
+    if (!userId) return respond(200, { received: true });
+
+    if (plan === "one_time") {
+      await runSql("UPDATE subscriptions SET analysis_credits = analysis_credits + 1, updated_at = NOW() WHERE user_id = :uid", [
+        { name: "uid", value: { stringValue: userId } },
+      ]);
+    } else {
+      const credits = plan === "pro_plus" ? 15 : 5;
+      await runSql(
+        "UPDATE subscriptions SET stripe_subscription_id = :sid, plan = :plan, status = 'active', analysis_credits = :credits, current_period_end = :end, updated_at = NOW() WHERE user_id = :uid",
+        [
+          { name: "sid", value: { stringValue: data.subscription || "" } },
+          { name: "plan", value: { stringValue: plan } },
+          { name: "credits", value: { longValue: credits } },
+          { name: "end", value: { stringValue: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString() } },
+          { name: "uid", value: { stringValue: userId } },
+        ]
+      );
+    }
+  } else if (type === "customer.subscription.updated" || type === "customer.subscription.deleted") {
+    const subId = data.id;
+    const status = data.status;
+    if (status === "canceled" || status === "unpaid" || type === "customer.subscription.deleted") {
+      await runSql("UPDATE subscriptions SET status = 'canceled', plan = 'free', analysis_credits = 0, updated_at = NOW() WHERE stripe_subscription_id = :sid", [
+        { name: "sid", value: { stringValue: subId } },
+      ]);
+    } else if (status === "active") {
+      const periodEnd = data.current_period_end ? new Date(data.current_period_end * 1000).toISOString() : null;
+      if (periodEnd) {
+        await runSql("UPDATE subscriptions SET status = 'active', current_period_end = :end, updated_at = NOW() WHERE stripe_subscription_id = :sid", [
+          { name: "end", value: { stringValue: periodEnd } },
+          { name: "sid", value: { stringValue: subId } },
+        ]);
+      }
+    }
+  } else if (type === "invoice.paid") {
+    const subId = data.subscription;
+    if (subId) {
+      const subRow = await runSql("SELECT plan FROM subscriptions WHERE stripe_subscription_id = :sid", [
+        { name: "sid", value: { stringValue: subId } },
+      ]);
+      const rows = parseRows(subRow);
+      if (rows.length > 0) {
+        const credits = rows[0].plan === "pro_plus" ? 15 : 5;
+        await runSql("UPDATE subscriptions SET analysis_credits = :credits, status = 'active', updated_at = NOW() WHERE stripe_subscription_id = :sid", [
+          { name: "credits", value: { longValue: credits } },
+          { name: "sid", value: { stringValue: subId } },
+        ]);
+      }
+    }
+  }
+
+  return respond(200, { received: true });
+}
+
 // ─── AI Video Analysis Handler ───
 async function handleAIAnalysis(event, body) {
   const user = await getUserFromToken(event);
@@ -2466,8 +2625,10 @@ export async function handler(event) {
     // AI Analysis
     if (path === "/ai-analysis" && method === "POST") return await handleAIAnalysis(event, body);
 
-    // Subscription routes
+    // Subscription & Stripe routes
     if (path === "/subscriptions/status" && method === "GET") return await handleGetSubscription(event);
+    if (path === "/checkout" && method === "POST") return await handleCreateCheckout(event, body);
+    if (path === "/stripe/webhook" && method === "POST") return await handleStripeWebhook(event);
 
     // Coach routes (marketplace)
     if (path === "/coaches" && method === "GET") return await handleGetCoaches();
