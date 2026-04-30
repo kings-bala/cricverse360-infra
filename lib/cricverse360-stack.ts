@@ -151,8 +151,8 @@ export class CricVerse360Stack extends cdk.Stack {
       runtime: lambda.Runtime.NODEJS_22_X,
       handler: "index.handler",
       code: lambda.Code.fromAsset(path.join(__dirname, "../lambda")),
-      memorySize: 256,
-      timeout: cdk.Duration.seconds(60),
+      memorySize: 512,
+      timeout: cdk.Duration.seconds(120),
       environment:{
         DB_CLUSTER_ARN: dbCluster.clusterArn,
         DB_SECRET_ARN: dbCluster.secret?.secretArn || "",
