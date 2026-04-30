@@ -323,6 +323,73 @@ async function initDb() {
       content TEXT NOT NULL,
       created_at TIMESTAMP DEFAULT NOW()
     )`,
+    `CREATE TABLE IF NOT EXISTS player_profiles (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      username TEXT UNIQUE NOT NULL,
+      age INTEGER,
+      location TEXT DEFAULT '',
+      role TEXT DEFAULT 'batsman',
+      batting_style TEXT DEFAULT '',
+      bowling_style TEXT DEFAULT '',
+      academy TEXT DEFAULT '',
+      bio TEXT DEFAULT '',
+      public_profile_enabled BOOLEAN DEFAULT TRUE,
+      best_score INTEGER DEFAULT 0,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS videos (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      player_profile_id TEXT DEFAULT '',
+      video_url TEXT DEFAULT '',
+      video_key TEXT NOT NULL,
+      video_type TEXT DEFAULT 'batting',
+      status TEXT DEFAULT 'uploaded',
+      thumbnail_url TEXT DEFAULT '',
+      created_at TIMESTAMP DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS subscriptions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      stripe_customer_id TEXT DEFAULT '',
+      stripe_subscription_id TEXT DEFAULT '',
+      plan TEXT DEFAULT 'free',
+      status TEXT DEFAULT 'active',
+      current_period_end TIMESTAMP,
+      analysis_credits INTEGER DEFAULT 1,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE(user_id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS coaches (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      location TEXT DEFAULT '',
+      specialization TEXT DEFAULT '',
+      experience TEXT DEFAULT '',
+      price NUMERIC DEFAULT 0,
+      profile_image TEXT DEFAULT '',
+      bio TEXT DEFAULT '',
+      active BOOLEAN DEFAULT TRUE,
+      created_at TIMESTAMP DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS coach_requests (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      coach_id TEXT NOT NULL REFERENCES coaches(id),
+      message TEXT DEFAULT '',
+      status TEXT DEFAULT 'pending',
+      created_at TIMESTAMP DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS analytics_events (
+      id TEXT PRIMARY KEY,
+      user_id TEXT DEFAULT '',
+      event_name TEXT NOT NULL,
+      event_data JSONB DEFAULT '{}',
+      created_at TIMESTAMP DEFAULT NOW()
+    )`,
   ];
   for (const sql of tables) {
     await runSql(sql);
@@ -1810,6 +1877,282 @@ async function handleDrillVideoUpload(event, body) {
   return respond(200, { uploadUrl: url, key });
 }
 
+// ─── Player Profile Handlers ───
+async function handleGetPlayerProfile(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const result = await runSql(
+    "SELECT pp.* FROM player_profiles pp JOIN users u ON pp.user_id = u.id WHERE u.email = :email",
+    [{ name: "email", value: { stringValue: user.email } }]
+  );
+  const rows = parseRows(result);
+  if (rows.length === 0) return respond(404, { error: "Player profile not found" });
+  return respond(200, rows[0]);
+}
+
+async function handleCreatePlayerProfile(event, body) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const { username, age, location, role, battingStyle, bowlingStyle, academy, bio } = body;
+  if (!username) return respond(400, { error: "username is required" });
+  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const userId = parseRows(userRow)[0]?.id;
+  if (!userId) return respond(404, { error: "User not found" });
+  const id = crypto.randomUUID();
+  try {
+    await runSql(
+      `INSERT INTO player_profiles (id, user_id, username, age, location, role, batting_style, bowling_style, academy, bio)
+       VALUES (:id, :uid, :username, :age, :location, :role, :bat, :bowl, :academy, :bio)`,
+      [
+        { name: "id", value: { stringValue: id } },
+        { name: "uid", value: { stringValue: userId } },
+        { name: "username", value: { stringValue: username } },
+        { name: "age", value: age ? { longValue: age } : { isNull: true } },
+        { name: "location", value: { stringValue: location || "" } },
+        { name: "role", value: { stringValue: role || "batsman" } },
+        { name: "bat", value: { stringValue: battingStyle || "" } },
+        { name: "bowl", value: { stringValue: bowlingStyle || "" } },
+        { name: "academy", value: { stringValue: academy || "" } },
+        { name: "bio", value: { stringValue: bio || "" } },
+      ]
+    );
+    // Create a free subscription for the user
+    const subId = crypto.randomUUID();
+    await runSql(
+      `INSERT INTO subscriptions (id, user_id, plan, status, analysis_credits)
+       VALUES (:id, :uid, 'free', 'active', 1)
+       ON CONFLICT (user_id) DO NOTHING`,
+      [
+        { name: "id", value: { stringValue: subId } },
+        { name: "uid", value: { stringValue: userId } },
+      ]
+    );
+    return respond(201, { id, message: "Player profile created" });
+  } catch (err) {
+    if (err.message?.includes("unique") || err.message?.includes("duplicate")) {
+      return respond(409, { error: "Username already taken" });
+    }
+    return respond(500, { error: err.message });
+  }
+}
+
+async function handleUpdatePlayerProfile(event, body) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const { age, location, role, battingStyle, bowlingStyle, academy, bio, publicProfileEnabled } = body;
+  await runSql(
+    `UPDATE player_profiles SET
+      age = COALESCE(:age, age),
+      location = COALESCE(:location, location),
+      role = COALESCE(:role, role),
+      batting_style = COALESCE(:bat, batting_style),
+      bowling_style = COALESCE(:bowl, bowling_style),
+      academy = COALESCE(:academy, academy),
+      bio = COALESCE(:bio, bio),
+      public_profile_enabled = COALESCE(:pub, public_profile_enabled),
+      updated_at = NOW()
+    WHERE user_id = (SELECT id FROM users WHERE email = :email)`,
+    [
+      { name: "age", value: age ? { longValue: age } : { isNull: true } },
+      { name: "location", value: location ? { stringValue: location } : { isNull: true } },
+      { name: "role", value: role ? { stringValue: role } : { isNull: true } },
+      { name: "bat", value: battingStyle ? { stringValue: battingStyle } : { isNull: true } },
+      { name: "bowl", value: bowlingStyle ? { stringValue: bowlingStyle } : { isNull: true } },
+      { name: "academy", value: academy ? { stringValue: academy } : { isNull: true } },
+      { name: "bio", value: bio ? { stringValue: bio } : { isNull: true } },
+      { name: "pub", value: publicProfileEnabled !== undefined ? { booleanValue: publicProfileEnabled } : { isNull: true } },
+      { name: "email", value: { stringValue: user.email } },
+    ]
+  );
+  return respond(200, { message: "Profile updated" });
+}
+
+async function handleGetPublicProfile(event) {
+  const username = event.pathParameters?.username || event.path.split("/").pop();
+  const result = await runSql(
+    `SELECT pp.*, u.full_name, u.avatar_url FROM player_profiles pp
+     JOIN users u ON pp.user_id = u.id
+     WHERE pp.username = :username AND pp.public_profile_enabled = TRUE`,
+    [{ name: "username", value: { stringValue: username } }]
+  );
+  const rows = parseRows(result);
+  if (rows.length === 0) return respond(404, { error: "Profile not found" });
+  // Get analysis history
+  const analyses = await runSql(
+    `SELECT a.analysis_type, a.scores, a.created_at FROM analysis a
+     WHERE a.user_id = :uid ORDER BY a.created_at DESC LIMIT 10`,
+    [{ name: "uid", value: { stringValue: rows[0].user_id } }]
+  );
+  return respond(200, { profile: rows[0], analyses: parseRows(analyses) });
+}
+
+// ─── Video & Analysis Handlers ───
+async function handleCreateVideo(event, body) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const { videoType } = body;
+  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const userId = parseRows(userRow)[0]?.id;
+  if (!userId) return respond(404, { error: "User not found" });
+
+  // Check analysis credits
+  const sub = await runSql(
+    "SELECT plan, analysis_credits FROM subscriptions WHERE user_id = :uid",
+    [{ name: "uid", value: { stringValue: userId } }]
+  );
+  const subRows = parseRows(sub);
+  const credits = subRows.length > 0 ? parseInt(subRows[0].analysis_credits || "0", 10) : 1;
+  if (credits <= 0) {
+    return respond(403, { error: "No analysis credits remaining. Please upgrade your plan.", upgradeRequired: true });
+  }
+
+  const ext = body.extension || "mp4";
+  const contentType = body.contentType || "video/mp4";
+  const videoId = crypto.randomUUID();
+  const key = `videos/${userId}/${videoId}.${ext}`;
+  const uploadUrl = await getSignedUrl(s3, new PutObjectCommand({
+    Bucket: BUCKET_NAME,
+    Key: key,
+    ContentType: contentType,
+  }), { expiresIn: 600 });
+
+  await runSql(
+    `INSERT INTO videos (id, user_id, video_key, video_type, status)
+     VALUES (:id, :uid, :key, :vtype, 'uploaded')`,
+    [
+      { name: "id", value: { stringValue: videoId } },
+      { name: "uid", value: { stringValue: userId } },
+      { name: "key", value: { stringValue: key } },
+      { name: "vtype", value: { stringValue: videoType || "batting" } },
+    ]
+  );
+  return respond(200, { videoId, uploadUrl, key });
+}
+
+async function handleGetVideo(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const videoId = event.pathParameters?.videoId || event.path.split("/").pop();
+  const result = await runSql(
+    "SELECT * FROM videos WHERE id = :id AND user_id = (SELECT id FROM users WHERE email = :email)",
+    [
+      { name: "id", value: { stringValue: videoId } },
+      { name: "email", value: { stringValue: user.email } },
+    ]
+  );
+  const rows = parseRows(result);
+  if (rows.length === 0) return respond(404, { error: "Video not found" });
+  return respond(200, rows[0]);
+}
+
+async function handleGetUserVideos(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const result = await runSql(
+    "SELECT * FROM videos WHERE user_id = (SELECT id FROM users WHERE email = :email) ORDER BY created_at DESC",
+    [{ name: "email", value: { stringValue: user.email } }]
+  );
+  return respond(200, parseRows(result));
+}
+
+async function handleGetSubscription(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const userId = parseRows(userRow)[0]?.id;
+  if (!userId) return respond(404, { error: "User not found" });
+  const result = await runSql("SELECT * FROM subscriptions WHERE user_id = :uid", [
+    { name: "uid", value: { stringValue: userId } },
+  ]);
+  const rows = parseRows(result);
+  if (rows.length === 0) {
+    return respond(200, { plan: "free", status: "active", analysis_credits: 1 });
+  }
+  return respond(200, rows[0]);
+}
+
+// ─── Coach Request Handlers ───
+async function handleCreateCoachRequest(event, body) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const { coachId, message } = body;
+  if (!coachId) return respond(400, { error: "coachId is required" });
+  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const userId = parseRows(userRow)[0]?.id;
+  if (!userId) return respond(404, { error: "User not found" });
+  const id = crypto.randomUUID();
+  await runSql(
+    "INSERT INTO coach_requests (id, user_id, coach_id, message) VALUES (:id, :uid, :cid, :msg)",
+    [
+      { name: "id", value: { stringValue: id } },
+      { name: "uid", value: { stringValue: userId } },
+      { name: "cid", value: { stringValue: coachId } },
+      { name: "msg", value: { stringValue: message || "" } },
+    ]
+  );
+  return respond(201, { id, message: "Coach request submitted" });
+}
+
+async function handleGetCoachRequests(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const dbUser = await runSql("SELECT id, role FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const rows = parseRows(dbUser);
+  if (!rows.length || rows[0].role !== "admin") return respond(403, { error: "Admin access required" });
+  const result = await runSql(
+    `SELECT cr.*, u.full_name as user_name, u.email as user_email, c.name as coach_name
+     FROM coach_requests cr
+     JOIN users u ON cr.user_id = u.id
+     JOIN coaches c ON cr.coach_id = c.id
+     ORDER BY cr.created_at DESC`
+  );
+  return respond(200, parseRows(result));
+}
+
+async function handleGetCoaches() {
+  const result = await runSql("SELECT * FROM coaches WHERE active = TRUE ORDER BY name ASC");
+  return respond(200, parseRows(result));
+}
+
+// ─── Analytics Events Handler ───
+async function handleTrackEvent(event, body) {
+  const { eventName, eventData, userId } = body;
+  if (!eventName) return respond(400, { error: "eventName is required" });
+  const id = crypto.randomUUID();
+  let uid = userId || "";
+  if (!uid) {
+    try {
+      const user = await getUserFromToken(event);
+      if (user) {
+        const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
+          { name: "email", value: { stringValue: user.email } },
+        ]);
+        uid = parseRows(userRow)[0]?.id || "";
+      }
+    } catch { /* anonymous event */ }
+  }
+  await runSql(
+    "INSERT INTO analytics_events (id, user_id, event_name, event_data) VALUES (:id, :uid, :name, :data::jsonb)",
+    [
+      { name: "id", value: { stringValue: id } },
+      { name: "uid", value: { stringValue: uid } },
+      { name: "name", value: { stringValue: eventName } },
+      { name: "data", value: { stringValue: JSON.stringify(eventData || {}) } },
+    ]
+  );
+  return respond(200, { message: "Event tracked" });
+}
+
 // ─── Main Router ───
 export async function handler(event) {
   const method = event.httpMethod;
@@ -1943,6 +2286,28 @@ export async function handler(event) {
     if (path.match(/^\/drills\/[^/]+$/) && method === "GET") return await handleGetDrillById(event);
     if (path.match(/^\/drills\/[^/]+$/) && method === "PUT") return await handleUpdateDrill(event, body);
     if (path.match(/^\/drills\/[^/]+$/) && method === "DELETE") return await handleDeleteDrill(event);
+
+    // Player profile routes
+    if (path === "/player-profiles" && method === "GET") return await handleGetPlayerProfile(event);
+    if (path === "/player-profiles" && method === "POST") return await handleCreatePlayerProfile(event, body);
+    if (path === "/player-profiles" && method === "PUT") return await handleUpdatePlayerProfile(event, body);
+    if (path.match(/^\/player\/[^/]+$/) && method === "GET") return await handleGetPublicProfile(event);
+
+    // Video routes
+    if (path === "/videos" && method === "POST") return await handleCreateVideo(event, body);
+    if (path === "/videos" && method === "GET") return await handleGetUserVideos(event);
+    if (path.match(/^\/videos\/[^/]+$/) && method === "GET") return await handleGetVideo(event);
+
+    // Subscription routes
+    if (path === "/subscriptions/status" && method === "GET") return await handleGetSubscription(event);
+
+    // Coach routes (marketplace)
+    if (path === "/coaches" && method === "GET") return await handleGetCoaches();
+    if (path === "/coach-requests" && method === "POST") return await handleCreateCoachRequest(event, body);
+    if (path === "/coach-requests" && method === "GET") return await handleGetCoachRequests(event);
+
+    // Analytics events
+    if (path === "/events" && method === "POST") return await handleTrackEvent(event, body);
 
     // Health check
     if ((path === "/health" || path === "/" || path === "") && method === "GET") {
