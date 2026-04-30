@@ -1080,7 +1080,7 @@ async function handleAdminDashboard(event) {
     runSql("SELECT COUNT(*) as count FROM subscriptions WHERE status = 'active' AND plan != 'free'"),
     runSql("SELECT COUNT(*) as count FROM coach_requests WHERE status = 'pending'"),
     runSql("SELECT COUNT(*) as count FROM videos WHERE status = 'failed'"),
-    runSql("SELECT id, email, name, role, created_at FROM users ORDER BY created_at DESC LIMIT 10"),
+    runSql("SELECT id, email, full_name as name, role, created_at FROM users ORDER BY created_at DESC LIMIT 10"),
     runSql("SELECT a.id, a.analysis_type, a.scores, a.created_at, u.email FROM analysis a JOIN users u ON a.user_id = u.id ORDER BY a.created_at DESC LIMIT 10"),
   ]);
 
