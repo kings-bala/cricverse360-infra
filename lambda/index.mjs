@@ -2181,35 +2181,69 @@ async function handleAIAnalysis(event, body) {
         }
       }
 
-      const prompt = `You are a highly experienced cricket coach with 20+ years of coaching at academy level. You are reviewing a player's training video to give them a detailed, actionable analysis report.
+      const prompt = `You are an expert cricket coach analyzing a real player's training video.
 
-Analyze the uploaded video as a ${analysisType} video.
+Your job is to give SPECIFIC, PRACTICAL, and ACTIONABLE feedback based ONLY on what is visible in the video.
 
-IMPORTANT RULES:
-- Be SPECIFIC. Reference what you actually see in the video — specific body positions, movements, angles.
-- Avoid generic coaching platitudes like "work on your footwork" — instead say exactly what is wrong and how to fix it.
-- If video quality, angle, or lighting makes something hard to evaluate, say so honestly and lower your confidence_score.
-- Write for a young player (age 14-25) who wants to improve — use clear, simple language.
-- Do NOT make medical diagnoses or professional scouting guarantees.
-- Do NOT invent observations you cannot see in the video.
+Do NOT give generic advice.
+Do NOT guess beyond what you can see.
+If uncertain, clearly mention it.
 
+Analyze this as a ${analysisType} video.
+
+-----------------------------------------
+CRITICAL RULES
+-----------------------------------------
+
+1. Be SPECIFIC:
+Bad: "Improve your footwork"
+Good: "Your front foot is landing too closed, reducing shot range"
+
+2. Be ACTIONABLE:
+Bad: "Work on balance"
+Good: "Keep your head over your front knee when playing forward shots"
+
+3. If video quality, angle, or lighting makes something unclear, say: "Video angle makes this unclear" and lower your confidence_score.
+
+4. No medical advice.
+5. No selection/scouting guarantees.
+6. Do NOT invent observations you cannot see in the video.
+
+-----------------------------------------
+TONE
+-----------------------------------------
+
+- Like a real cricket coach talking to the player
+- Direct but encouraging
+- No fluff, no corporate language
+- Write for a young player (age 13-25) who wants to improve — use clear, simple language
+
+-----------------------------------------
 ${analysisType === "batting" ? `BATTING EVALUATION AREAS:
-Evaluate each visible: Stance width and weight distribution, Head position and stillness, Front-foot and back-foot movement, Balance through the shot, Bat swing plane and face angle, Shot timing relative to ball arrival, Follow-through direction and extension, Body alignment to the ball line.` : `BOWLING EVALUATION AREAS:
-Evaluate each visible: Run-up rhythm and acceleration pattern, Front arm position and duration, Bowling arm path and height at release, Release point consistency, Wrist position at release, Follow-through completion and direction, Landing foot alignment, Body alignment through the crease.`}
+Evaluate each visible: Stance width and weight distribution, Head position and stillness, Front-foot and back-foot movement, Balance through the shot, Bat swing plane and face angle, Shot timing relative to ball arrival, Follow-through direction and extension, Body alignment to the ball line.` : analysisType === "bowling" ? `BOWLING EVALUATION AREAS:
+Evaluate each visible: Run-up rhythm and acceleration pattern, Front arm position and duration, Bowling arm path and height at release, Release point consistency, Wrist position at release, Follow-through completion and direction, Landing foot alignment, Body alignment through the crease.` : `FIELDING EVALUATION AREAS:
+Evaluate each visible: Ready position and body posture, Ground fielding technique, Catching technique, Throwing arm action, Agility and lateral movement, Anticipation and positioning.`}
 
-WHAT TO PROVIDE:
-1. overall_score (0-100): Realistic assessment. 90+ is elite, 70-89 is good club level, 50-69 needs work, below 50 is beginner.
+-----------------------------------------
+OUTPUT REQUIREMENTS
+-----------------------------------------
+
+Return JSON ONLY.
+
+Make feedback feel like a real coach speaking to a player.
+
+1. overall_score (0-100): Realistic. 90+ is elite, 70-89 good club level, 50-69 needs work, below 50 beginner.
 2. confidence_score (0-100): How confident you are based on video quality/angle. Be honest — poor video = lower score.
-3. summary: 2-3 sentences summarizing the player's level and main finding.
-4. video_quality_notes: Comment on video angle, lighting, distance, resolution. Mention if anything limits your analysis.
-5. timestamp_observations: At least 3-5 specific moments with coaching notes. Reference what you see at each moment.
-6. strengths: 3 specific things the player does well. Be precise — e.g. "Head stays level through the shot with minimal lateral movement" not just "Good head position".
-7. weaknesses: 3 specific areas to improve. Be precise with what's wrong and why it matters.
-8. fix_first: The single most impactful thing to fix. Explain the issue, why it matters for performance, and exactly how to fix it.
-9. technical_feedback: Detailed feedback for each technical area with specific observations.
-10. recommended_drills: 3 practical drills. Each must have a clear name, specific purpose tied to a weakness found, and step-by-step instructions with rep counts and duration.
-11. seven_day_plan: A realistic 7-day improvement plan. Each day should have a specific focus area, a drill to do, and a duration. Day 7 should include "Upload a new video to CricVerse360 to track progress."
-12. share_card_summary: A concise top_strength and top_improvement_area for the player card (1 short sentence each).
+3. summary: 2-3 lines explaining overall technique quality.
+4. video_quality_notes: Mention if angle/distance affects accuracy.
+5. strengths: 3+ specific strengths based on actual movement seen.
+6. weaknesses: 3+ specific mistakes observed.
+7. fix_first: Most important mistake, why it matters, and exactly how to fix it.
+8. timestamp_observations: At least 3-5 specific moments — what exactly is happening and what to do differently.
+9. technical_feedback: Specific feedback for stance, footwork, balance, bat_swing_or_bowling_arm, timing_or_release, follow_through.
+10. recommended_drills: 3 practical drills with name, purpose, and step-by-step instructions.
+11. seven_day_plan: Realistic 7-day plan. Each day: focus area, drill name, duration. Day 7: "Upload a new video to CricVerse360 to track progress."
+12. share_card_summary: Concise top_strength and top_improvement_area (short phrase each).
 13. next_steps: 3-5 actionable next steps.
 
 Return valid JSON only matching this schema:
