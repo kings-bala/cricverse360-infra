@@ -571,8 +571,23 @@ async function handleAuthMe(event) {
     { name: "email", value: { stringValue: user.email } },
   ]);
   const rows = parseRows(result);
-  if (rows.length === 0) return respond(404, { error: "User profile not found" });
-  return respond(200, rows[0]);
+  if (rows.length > 0) return respond(200, rows[0]);
+
+  // Auto-create DB record for OAuth users (e.g. Google Sign-In)
+  const userId = user.sub || crypto.randomUUID();
+  const fullName = user.name || user.email.split("@")[0];
+  await runSql(
+    "INSERT INTO users (id, email, full_name, role) VALUES (:id, :email, :name, 'player') ON CONFLICT (email) DO NOTHING",
+    [
+      { name: "id", value: { stringValue: userId } },
+      { name: "email", value: { stringValue: user.email } },
+      { name: "name", value: { stringValue: fullName } },
+    ]
+  );
+  const created = await runSql("SELECT * FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  return respond(200, parseRows(created)[0] || { id: userId, email: user.email, full_name: fullName, role: "player" });
 }
 
 async function handleGetProfile(event) {
@@ -2115,11 +2130,7 @@ async function handleAIAnalysis(event, body) {
   const { videoId, analysisType, videoKey } = body;
   if (!videoId || !analysisType) return respond(400, { error: "videoId and analysisType are required" });
 
-  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
-    { name: "email", value: { stringValue: user.email } },
-  ]);
-  const userId = parseRows(userRow)[0]?.id;
-  if (!userId) return respond(404, { error: "User not found" });
+  const userId = await ensureDbUser(user);
 
   // Check credits
   const sub = await runSql("SELECT plan, analysis_credits FROM subscriptions WHERE user_id = :uid", [
@@ -2553,16 +2564,35 @@ async function handleGetPublicProfile(event) {
   return respond(200, { profile: rows[0], analyses: parseRows(analyses) });
 }
 
+// Ensure user exists in DB, auto-creating for OAuth users if needed
+async function ensureDbUser(user) {
+  const result = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const rows = parseRows(result);
+  if (rows.length > 0) return rows[0].id;
+  const userId = user.sub || crypto.randomUUID();
+  const fullName = user.name || user.email.split("@")[0];
+  await runSql(
+    "INSERT INTO users (id, email, full_name, role) VALUES (:id, :email, :name, 'player') ON CONFLICT (email) DO NOTHING",
+    [
+      { name: "id", value: { stringValue: userId } },
+      { name: "email", value: { stringValue: user.email } },
+      { name: "name", value: { stringValue: fullName } },
+    ]
+  );
+  const created = await runSql("SELECT id FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  return parseRows(created)[0]?.id || userId;
+}
+
 // ─── Video & Analysis Handlers ───
 async function handleCreateVideo(event, body) {
   const user = await getUserFromToken(event);
   if (!user) return respond(401, { error: "Unauthorized" });
   const { videoType } = body;
-  const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
-    { name: "email", value: { stringValue: user.email } },
-  ]);
-  const userId = parseRows(userRow)[0]?.id;
-  if (!userId) return respond(404, { error: "User not found" });
+  const userId = await ensureDbUser(user);
 
   // Check analysis credits
   const sub = await runSql(
