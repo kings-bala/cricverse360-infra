@@ -2179,29 +2179,36 @@ async function handleAIAnalysis(event, body) {
         }
       }
 
-      const prompt = `You are an expert cricket coach analyzing a cricket training video.
+      const prompt = `You are a highly experienced cricket coach with 20+ years of coaching at academy level. You are reviewing a player's training video to give them a detailed, actionable analysis report.
 
 Analyze the uploaded video as a ${analysisType} video.
 
-Return JSON only using the required schema.
+IMPORTANT RULES:
+- Be SPECIFIC. Reference what you actually see in the video — specific body positions, movements, angles.
+- Avoid generic coaching platitudes like "work on your footwork" — instead say exactly what is wrong and how to fix it.
+- If video quality, angle, or lighting makes something hard to evaluate, say so honestly and lower your confidence_score.
+- Write for a young player (age 14-25) who wants to improve — use clear, simple language.
+- Do NOT make medical diagnoses or professional scouting guarantees.
+- Do NOT invent observations you cannot see in the video.
 
-Focus on practical coaching feedback for a developing cricket player.
+${analysisType === "batting" ? `BATTING EVALUATION AREAS:
+Evaluate each visible: Stance width and weight distribution, Head position and stillness, Front-foot and back-foot movement, Balance through the shot, Bat swing plane and face angle, Shot timing relative to ball arrival, Follow-through direction and extension, Body alignment to the ball line.` : `BOWLING EVALUATION AREAS:
+Evaluate each visible: Run-up rhythm and acceleration pattern, Front arm position and duration, Bowling arm path and height at release, Release point consistency, Wrist position at release, Follow-through completion and direction, Landing foot alignment, Body alignment through the crease.`}
 
-Evaluate only what is visible in the video. If the video angle, lighting, distance, or quality limits your confidence, clearly mention it and lower the confidence_score.
-
-Do not claim professional scouting certainty. Do not provide medical diagnosis.
-
-${analysisType === "batting" ? `For batting, evaluate: Stance, Head position, Footwork, Balance, Bat swing path, Shot timing, Follow-through, Body alignment.` : `For bowling, evaluate: Run-up rhythm, Front arm usage, Bowling arm path, Release position, Follow-through, Balance, Body alignment, Possible injury risk indicators.`}
-
-Provide:
-- overall_score from 0 to 100
-- confidence_score from 0 to 100
-- timestamp-based observations where possible
-- strengths (list)
-- weaknesses (list)
-- technical feedback for each area
-- recommended drills with name, purpose, and instructions
-- next_steps (list)
+WHAT TO PROVIDE:
+1. overall_score (0-100): Realistic assessment. 90+ is elite, 70-89 is good club level, 50-69 needs work, below 50 is beginner.
+2. confidence_score (0-100): How confident you are based on video quality/angle. Be honest — poor video = lower score.
+3. summary: 2-3 sentences summarizing the player's level and main finding.
+4. video_quality_notes: Comment on video angle, lighting, distance, resolution. Mention if anything limits your analysis.
+5. timestamp_observations: At least 3-5 specific moments with coaching notes. Reference what you see at each moment.
+6. strengths: 3 specific things the player does well. Be precise — e.g. "Head stays level through the shot with minimal lateral movement" not just "Good head position".
+7. weaknesses: 3 specific areas to improve. Be precise with what's wrong and why it matters.
+8. fix_first: The single most impactful thing to fix. Explain the issue, why it matters for performance, and exactly how to fix it.
+9. technical_feedback: Detailed feedback for each technical area with specific observations.
+10. recommended_drills: 3 practical drills. Each must have a clear name, specific purpose tied to a weakness found, and step-by-step instructions with rep counts and duration.
+11. seven_day_plan: A realistic 7-day improvement plan. Each day should have a specific focus area, a drill to do, and a duration. Day 7 should include "Upload a new video to CricVerse360 to track progress."
+12. share_card_summary: A concise top_strength and top_improvement_area for the player card (1 short sentence each).
+13. next_steps: 3-5 actionable next steps.
 
 Return valid JSON only matching this schema:
 {
@@ -2214,11 +2221,29 @@ Return valid JSON only matching this schema:
   "timestamp_observations": [{"timestamp": "00:03", "observation": "", "coaching_note": ""}],
   "strengths": [],
   "weaknesses": [],
+  "fix_first": {
+    "issue": "",
+    "why_it_matters": "",
+    "how_to_fix": ""
+  },
   "technical_feedback": {
     "stance": "", "head_position": "", "footwork": "", "balance": "",
     "bat_swing_or_bowling_arm": "", "timing_or_release": "", "follow_through": ""
   },
   "recommended_drills": [{"name": "", "purpose": "", "instructions": ""}],
+  "seven_day_plan": [
+    {"day": 1, "focus": "", "drill": "", "duration": ""},
+    {"day": 2, "focus": "", "drill": "", "duration": ""},
+    {"day": 3, "focus": "", "drill": "", "duration": ""},
+    {"day": 4, "focus": "", "drill": "", "duration": ""},
+    {"day": 5, "focus": "", "drill": "", "duration": ""},
+    {"day": 6, "focus": "", "drill": "", "duration": ""},
+    {"day": 7, "focus": "", "drill": "", "duration": ""}
+  ],
+  "share_card_summary": {
+    "top_strength": "",
+    "top_improvement_area": ""
+  },
   "next_steps": [],
   "disclaimer": "This AI analysis is for training guidance only and is not a professional scouting or medical assessment."
 }`;
@@ -2234,7 +2259,7 @@ Return valid JSON only matching this schema:
             contents: [{ parts: contentParts }],
             generationConfig: {
               temperature: 0.7,
-              maxOutputTokens: 4000,
+              maxOutputTokens: 8000,
               responseMimeType: "application/json",
             },
           }),
@@ -2264,6 +2289,31 @@ Return valid JSON only matching this schema:
   if (!analysisResult.video_quality_notes) analysisResult.video_quality_notes = "";
   if (!analysisResult.timestamp_observations) analysisResult.timestamp_observations = [];
   if (!analysisResult.disclaimer) analysisResult.disclaimer = "This AI analysis is for training guidance only and is not a professional scouting or medical assessment.";
+  if (!analysisResult.fix_first) {
+    analysisResult.fix_first = {
+      issue: analysisResult.weaknesses?.[0] || "Technique needs improvement",
+      why_it_matters: "Fixing this will have the biggest impact on your overall score.",
+      how_to_fix: analysisResult.recommended_drills?.[0]?.instructions || "Practice with focused repetition and film yourself to track progress."
+    };
+  }
+  if (!analysisResult.seven_day_plan) {
+    const drills = analysisResult.recommended_drills || [];
+    analysisResult.seven_day_plan = [
+      { day: 1, focus: "Assessment", drill: "Watch your analysis video and note key areas", duration: "15 min" },
+      { day: 2, focus: drills[0]?.name || "Core technique", drill: drills[0]?.instructions || "Practice basic technique with slow repetitions", duration: "30 min" },
+      { day: 3, focus: "Rest + review", drill: "Watch coaching videos on your top weakness", duration: "20 min" },
+      { day: 4, focus: drills[1]?.name || "Drill practice", drill: drills[1]?.instructions || "Focused drill practice", duration: "30 min" },
+      { day: 5, focus: "Match simulation", drill: "Apply corrections in a practice match or net session", duration: "45 min" },
+      { day: 6, focus: drills[0]?.name || "Repeat day 2 drill", drill: "Repeat with higher intensity and self-filming", duration: "30 min" },
+      { day: 7, focus: "Record + upload", drill: "Upload a new video to CricVerse360 to track progress", duration: "15 min" },
+    ];
+  }
+  if (!analysisResult.share_card_summary) {
+    analysisResult.share_card_summary = {
+      top_strength: analysisResult.strengths?.[0] || "Solid technique foundation",
+      top_improvement_area: analysisResult.weaknesses?.[0] || "Room for technical improvement",
+    };
+  }
 
   // Save analysis
   const analysisId = crypto.randomUUID();
@@ -2328,10 +2378,30 @@ function generateFallbackAnalysis(analysisType) {
       { name: isBatting ? "Shadow Batting Drill" : "Target Bowling Drill", purpose: isBatting ? "Improve muscle memory for footwork" : "Improve accuracy and consistency", instructions: isBatting ? "Practice your stance, trigger movement, and shot execution without a ball. Focus on front-foot stride length. 50 reps daily." : "Place a target on a good length. Bowl 30 balls aiming at the target. Track hit percentage." },
       { name: isBatting ? "Throwdown Practice" : "Front Arm Drill", purpose: isBatting ? "Improve timing and shot selection" : "Keep front arm up longer", instructions: isBatting ? "Face throwdowns from 15 yards. Alternate between defensive and attacking shots. 30 balls per session." : "Bowl with focus on keeping front arm pointing at target until release. Film yourself to check. 20 balls per session." },
     ],
+    fix_first: {
+      issue: isBatting ? "Front-foot stride is too short, limiting weight transfer into drives" : "Front arm drops before release, reducing accuracy and pace",
+      why_it_matters: isBatting ? "A short stride means your weight stays back, reducing power on front-foot shots by 20-30%. This is the biggest limiter in your current technique." : "When your front arm drops early, your bowling shoulder opens up too soon. This causes your release point to vary, making your line and length inconsistent.",
+      how_to_fix: isBatting ? "Place a marker 60-70cm ahead of your front crease. Practice stepping to the marker on every front-foot shot. Start with shadow batting (no ball), then throwdowns. Film yourself from the side to check stride length." : "Tie a light resistance band around your front wrist. During your run-up, focus on keeping your front arm pointing at the target until your bowling arm passes your ear. Do 20 balls per session focusing only on this.",
+    },
+    seven_day_plan: [
+      { day: 1, focus: "Assessment", drill: "Watch your analysis video 3 times, noting the fix-first issue", duration: "15 min" },
+      { day: 2, focus: isBatting ? "Footwork basics" : "Front arm drill", drill: isBatting ? "Shadow batting with stride markers. 50 reps focusing on front-foot reach." : "Bowl 20 balls focusing only on front arm position. Film from side.", duration: "30 min" },
+      { day: 3, focus: "Rest + review", drill: "Watch Day 2 video. Compare to your analysis. Note improvements.", duration: "20 min" },
+      { day: 4, focus: isBatting ? "Timing drill" : "Target bowling", drill: isBatting ? "Face 30 throwdowns from 15 yards. Focus on meeting ball at optimal stride length." : "Place a target on good length. Bowl 30 balls tracking accuracy. Focus on front arm.", duration: "30 min" },
+      { day: 5, focus: "Match simulation", drill: "Net session or match practice. Apply corrections under pressure.", duration: "45 min" },
+      { day: 6, focus: isBatting ? "Repeat footwork" : "Repeat front arm", drill: "Repeat Day 2 drill with higher intensity. Self-film for comparison.", duration: "30 min" },
+      { day: 7, focus: "Record + upload", drill: "Upload a new video to CricVerse360 to track progress", duration: "15 min" },
+    ],
+    share_card_summary: {
+      top_strength: isBatting ? "Solid defensive technique with balanced setup" : "Smooth run-up rhythm with consistent follow-through",
+      top_improvement_area: isBatting ? "Front-foot stride needs more reach for power" : "Front arm drops early — fix for better accuracy",
+    },
     next_steps: [
-      `Focus on ${isBatting ? "front-foot movement" : "release point consistency"} for the next 2 weeks`,
-      "Upload another video after practicing to track improvement",
-      `Consider working with a ${isBatting ? "batting" : "bowling"} coach for personalized guidance`,
+      `Focus on ${isBatting ? "front-foot stride length" : "front arm position"} for the next 7 days using the plan above`,
+      "Film yourself during practice to compare with this analysis",
+      "Upload another video after 7 days to track improvement",
+      `Consider working with a ${isBatting ? "batting" : "bowling"} coach for hands-on guidance`,
+      "Share your player card to challenge teammates to beat your score",
     ],
   };
 }
