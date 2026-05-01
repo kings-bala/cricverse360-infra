@@ -417,6 +417,7 @@ async function initDb() {
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS google_access_token TEXT DEFAULT ''",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS google_refresh_token TEXT DEFAULT ''",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_provider TEXT DEFAULT 'email'",
+    "ALTER TABLE analysis ADD COLUMN IF NOT EXISTS result_json JSONB DEFAULT '{}'",
   ];
   for (const m of migrations) {
     try { await runSql(m); } catch(e) { /* migration may fail if already applied */ }
@@ -872,10 +873,45 @@ async function handleAnalysisHistory(event) {
   const user = await getUserFromToken(event);
   if (!user) return respond(401, { error: "Unauthorized" });
   const result = await runSql(
-    "SELECT * FROM analysis WHERE user_id = (SELECT id FROM users WHERE email = :email) ORDER BY created_at DESC LIMIT 50",
+    "SELECT id, analysis_type, scores, feedback, video_ref, created_at FROM analysis WHERE user_id = (SELECT id FROM users WHERE email = :email) ORDER BY created_at DESC LIMIT 50",
     [{ name: "email", value: { stringValue: user.email } }]
   );
   return respond(200, parseRows(result));
+}
+
+async function handleGetAnalysisById(event) {
+  const analysisId = event.path.split("/").pop();
+  if (!analysisId) return respond(400, { error: "Analysis ID is required" });
+
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+
+  const result = await runSql(
+    "SELECT a.* FROM analysis a JOIN users u ON a.user_id = u.id WHERE a.id = :id AND u.email = :email",
+    [
+      { name: "id", value: { stringValue: analysisId } },
+      { name: "email", value: { stringValue: user.email } },
+    ]
+  );
+  const rows = parseRows(result);
+  if (rows.length === 0) return respond(404, { error: "Analysis not found" });
+
+  const row = rows[0];
+  if (row.result_json && typeof row.result_json === "string") {
+    try { return respond(200, JSON.parse(row.result_json)); } catch { /* fall through */ }
+  }
+  if (row.result_json && typeof row.result_json === "object") {
+    return respond(200, row.result_json);
+  }
+  // Fallback for analyses saved before result_json column existed
+  return respond(200, {
+    analysisId: row.id,
+    analysis_type: row.analysis_type,
+    overall_score: row.scores?.overall || 0,
+    summary: row.feedback || "",
+    technical_feedback: row.scores || {},
+    created_at: row.created_at,
+  });
 }
 
 async function handleGetIdolSelections(event) {
@@ -2512,8 +2548,9 @@ Return valid JSON only matching this schema:
 
   // Save analysis
   const analysisId = crypto.randomUUID();
+  const fullResult = { analysisId, ...analysisResult, confidence: usedGemini ? "high" : "moderate" };
   await runSql(
-    "INSERT INTO analysis (id, user_id, analysis_type, scores, feedback, video_ref) VALUES (:id, :uid, :type, :scores::jsonb, :feedback, :ref)",
+    "INSERT INTO analysis (id, user_id, analysis_type, scores, feedback, video_ref, result_json) VALUES (:id, :uid, :type, :scores::jsonb, :feedback, :ref, :result::jsonb)",
     [
       { name: "id", value: { stringValue: analysisId } },
       { name: "uid", value: { stringValue: userId } },
@@ -2521,6 +2558,7 @@ Return valid JSON only matching this schema:
       { name: "scores", value: { stringValue: JSON.stringify({ overall: analysisResult.overall_score, ...analysisResult.technical_feedback }) } },
       { name: "feedback", value: { stringValue: analysisResult.summary } },
       { name: "ref", value: { stringValue: videoId } },
+      { name: "result", value: { stringValue: JSON.stringify(fullResult) } },
     ]
   );
 
@@ -2550,7 +2588,7 @@ Return valid JSON only matching this schema:
     ]);
   }
 
-  return respond(200, { analysisId, ...analysisResult, confidence: usedGemini ? "high" : "moderate" });
+  return respond(200, fullResult);
 }
 
 function generateFallbackAnalysis(analysisType) {
@@ -2986,6 +3024,7 @@ export async function handler(event) {
     // Analysis routes
     if (path === "/analysis" && method === "POST") return await handlePostAnalysis(event, body);
     if (path === "/analysis/history" && method === "GET") return await handleAnalysisHistory(event);
+    if (path.startsWith("/analysis/") && path !== "/analysis/history" && method === "GET") return await handleGetAnalysisById(event);
 
     // Idol routes
     if (path === "/idol/selections" && method === "GET") return await handleGetIdolSelections(event);
