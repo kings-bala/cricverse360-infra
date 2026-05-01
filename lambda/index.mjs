@@ -404,6 +404,9 @@ async function initDb() {
       awarded_by TEXT DEFAULT '',
       awarded_at TIMESTAMP DEFAULT NOW()
     )`,
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS google_access_token TEXT DEFAULT ''",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS google_refresh_token TEXT DEFAULT ''",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_provider TEXT DEFAULT 'email'",
   ];
   for (const m of migrations) {
     try { await runSql(m); } catch(e) { /* migration may fail if already applied */ }
@@ -588,6 +591,94 @@ async function handleAuthMe(event) {
     { name: "email", value: { stringValue: user.email } },
   ]);
   return respond(200, parseRows(created)[0] || { id: userId, email: user.email, full_name: fullName, role: "player" });
+}
+
+async function handleGoogleAuth(body) {
+  const { code, redirect_uri } = body;
+  if (!code) return respond(400, { error: "Authorization code is required" });
+
+  const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+  const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+    return respond(500, { error: "Google OAuth not configured" });
+  }
+
+  // Exchange authorization code for tokens
+  const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      code,
+      client_id: GOOGLE_CLIENT_ID,
+      client_secret: GOOGLE_CLIENT_SECRET,
+      redirect_uri: redirect_uri || "https://cricverse360.com/auth/callback",
+      grant_type: "authorization_code",
+    }).toString(),
+  });
+  const tokenData = await tokenRes.json();
+  if (tokenData.error) {
+    console.error("Google token exchange error:", tokenData);
+    return respond(400, { error: tokenData.error_description || "Token exchange failed" });
+  }
+
+  const { access_token, refresh_token, id_token, expires_in } = tokenData;
+
+  // Decode ID token to get user info (JWT payload)
+  let userInfo = {};
+  if (id_token) {
+    try {
+      const payload = JSON.parse(Buffer.from(id_token.split(".")[1], "base64url").toString());
+      userInfo = { email: payload.email, name: payload.name, sub: payload.sub };
+    } catch (e) {
+      console.error("ID token decode error:", e);
+    }
+  }
+
+  // Fallback: fetch userinfo from Google
+  if (!userInfo.email && access_token) {
+    const infoRes = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+      headers: { Authorization: `Bearer ${access_token}` },
+    });
+    const info = await infoRes.json();
+    userInfo = { email: info.email, name: info.name, sub: info.sub };
+  }
+
+  if (!userInfo.email) {
+    return respond(400, { error: "Could not determine user email from Google" });
+  }
+
+  // Ensure user exists in DB
+  const userId = await ensureDbUser(userInfo);
+
+  // Store Google tokens and mark auth provider
+  await runSql(
+    `UPDATE users SET google_access_token = :token, google_refresh_token = :refresh, auth_provider = 'google', updated_at = NOW() WHERE id = :uid`,
+    [
+      { name: "token", value: { stringValue: access_token || "" } },
+      { name: "refresh", value: { stringValue: refresh_token || "" } },
+      { name: "uid", value: { stringValue: userId } },
+    ]
+  );
+
+  // Ensure subscription with 1 free credit
+  const existingSub = await runSql("SELECT id FROM subscriptions WHERE user_id = :uid", [
+    { name: "uid", value: { stringValue: userId } },
+  ]);
+  if (parseRows(existingSub).length === 0) {
+    await runSql(
+      "INSERT INTO subscriptions (id, user_id, plan, analysis_credits) VALUES (:id, :uid, 'free', 1)",
+      [
+        { name: "id", value: { stringValue: crypto.randomUUID() } },
+        { name: "uid", value: { stringValue: userId } },
+      ]
+    );
+  }
+
+  return respond(200, {
+    user: { id: userId, email: userInfo.email, full_name: userInfo.name, auth_provider: "google" },
+    google_access_token: access_token,
+    expires_in,
+  });
 }
 
 async function handleGetProfile(event) {
@@ -2127,19 +2218,59 @@ async function handleStripeWebhook(event) {
 async function handleAIAnalysis(event, body) {
   const user = await getUserFromToken(event);
   if (!user) return respond(401, { error: "Unauthorized" });
-  const { videoId, analysisType, videoKey } = body;
+  const { videoId, analysisType, videoKey, google_access_token: bodyGoogleToken } = body;
   if (!videoId || !analysisType) return respond(400, { error: "videoId and analysisType are required" });
 
   const userId = await ensureDbUser(user);
 
-  // Check credits
-  const sub = await runSql("SELECT plan, analysis_credits FROM subscriptions WHERE user_id = :uid", [
-    { name: "uid", value: { stringValue: userId } },
-  ]);
-  const subRows = parseRows(sub);
-  const credits = subRows.length > 0 ? parseInt(subRows[0].analysis_credits || "0", 10) : 1;
-  if (credits <= 0) {
-    return respond(403, { error: "No analysis credits remaining", upgradeRequired: true });
+  // Check if user has a Google access token (from request body or DB)
+  let userGoogleToken = bodyGoogleToken || "";
+  if (!userGoogleToken) {
+    const tokenResult = await runSql(
+      "SELECT google_access_token, google_refresh_token FROM users WHERE id = :uid",
+      [{ name: "uid", value: { stringValue: userId } }]
+    );
+    const tokenRows = parseRows(tokenResult);
+    if (tokenRows.length > 0 && tokenRows[0].google_access_token) {
+      userGoogleToken = tokenRows[0].google_access_token;
+      // Try to refresh if we have a refresh token
+      if (!userGoogleToken && tokenRows[0].google_refresh_token) {
+        try {
+          const refreshRes = await fetch("https://oauth2.googleapis.com/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              client_id: process.env.GOOGLE_CLIENT_ID || "",
+              client_secret: process.env.GOOGLE_CLIENT_SECRET || "",
+              refresh_token: tokenRows[0].google_refresh_token,
+              grant_type: "refresh_token",
+            }).toString(),
+          });
+          const refreshData = await refreshRes.json();
+          if (refreshData.access_token) {
+            userGoogleToken = refreshData.access_token;
+            await runSql("UPDATE users SET google_access_token = :token WHERE id = :uid", [
+              { name: "token", value: { stringValue: userGoogleToken } },
+              { name: "uid", value: { stringValue: userId } },
+            ]);
+          }
+        } catch (refreshErr) {
+          console.error("Google token refresh error:", refreshErr);
+        }
+      }
+    }
+  }
+
+  // Check credits (skip credit check if using user's own Google token)
+  if (!userGoogleToken) {
+    const sub = await runSql("SELECT plan, analysis_credits FROM subscriptions WHERE user_id = :uid", [
+      { name: "uid", value: { stringValue: userId } },
+    ]);
+    const subRows = parseRows(sub);
+    const credits = subRows.length > 0 ? parseInt(subRows[0].analysis_credits || "0", 10) : 1;
+    if (credits <= 0) {
+      return respond(403, { error: "No analysis credits remaining", upgradeRequired: true });
+    }
   }
 
   // Update video status
@@ -2148,11 +2279,23 @@ async function handleAIAnalysis(event, body) {
   ]);
 
   const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+  const useOAuthToken = !!userGoogleToken;
   let analysisResult;
   let usedGemini = false;
 
-  if (GEMINI_API_KEY) {
+  if (userGoogleToken || GEMINI_API_KEY) {
     try {
+      // Build auth for Gemini API calls
+      const geminiFileUrl = useOAuthToken
+        ? "https://generativelanguage.googleapis.com/upload/v1beta/files"
+        : `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${GEMINI_API_KEY}`;
+      const geminiContentUrl = useOAuthToken
+        ? "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+        : `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
+      const authHeaders = useOAuthToken
+        ? { Authorization: `Bearer ${userGoogleToken}` }
+        : {};
+
       // Download video from S3 for Gemini analysis
       const key = videoKey || "";
       let videoParts = [];
@@ -2167,19 +2310,16 @@ async function handleAIAnalysis(event, body) {
 
           // Upload to Gemini File API for large files (>20MB), inline for smaller
           if (videoBuffer.length > 20 * 1024 * 1024) {
-            // Use File API for large videos
-            const uploadRes = await fetch(
-              `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${GEMINI_API_KEY}`,
-              {
-                method: "POST",
-                headers: {
-                  "X-Goog-Upload-Command": "upload, finalize",
-                  "X-Goog-Upload-Header-Content-Type": mimeType,
-                  "Content-Type": mimeType,
-                },
-                body: videoBuffer,
-              }
-            );
+            const uploadRes = await fetch(geminiFileUrl, {
+              method: "POST",
+              headers: {
+                ...authHeaders,
+                "X-Goog-Upload-Command": "upload, finalize",
+                "X-Goog-Upload-Header-Content-Type": mimeType,
+                "Content-Type": mimeType,
+              },
+              body: videoBuffer,
+            });
             const uploadData = await uploadRes.json();
             if (uploadData.file?.uri) {
               videoParts = [{ fileData: { mimeType, fileUri: uploadData.file.uri } }];
@@ -2297,11 +2437,9 @@ Return valid JSON only matching this schema:
 
       const contentParts = [...videoParts, { text: prompt }];
 
-      const geminiRes = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
-        {
+      const geminiRes = await fetch(geminiContentUrl, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...authHeaders },
           body: JSON.stringify({
             contents: [{ parts: contentParts }],
             generationConfig: {
@@ -2376,11 +2514,13 @@ Return valid JSON only matching this schema:
     ]
   );
 
-  // Deduct credit
-  await runSql(
-    "UPDATE subscriptions SET analysis_credits = analysis_credits - 1, updated_at = NOW() WHERE user_id = :uid",
-    [{ name: "uid", value: { stringValue: userId } }]
-  );
+  // Deduct credit (skip for users using their own Google token)
+  if (!useOAuthToken) {
+    await runSql(
+      "UPDATE subscriptions SET analysis_credits = analysis_credits - 1, updated_at = NOW() WHERE user_id = :uid",
+      [{ name: "uid", value: { stringValue: userId } }]
+    );
+  }
 
   // Update video status
   await runSql("UPDATE videos SET status = 'analyzed' WHERE id = :id", [
@@ -2814,6 +2954,7 @@ export async function handler(event) {
     if (path === "/auth/forgot-password" && method === "POST") return await handleForgotPassword(body);
     if (path === "/auth/reset-password" && method === "POST") return await handleResetPassword(body);
     if (path === "/auth/me" && method === "GET") return await handleAuthMe(event);
+    if (path === "/auth/google" && method === "POST") return await handleGoogleAuth(body);
 
     // User routes
     if (path === "/users/profile" && method === "GET") return await handleGetProfile(event);

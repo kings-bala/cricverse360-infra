@@ -162,6 +162,8 @@ export class CricVerse360Stack extends cdk.Stack {
         BUCKET_NAME: bucket.bucketName,
         REGION: this.region,
         GEMINI_API_KEY: process.env.GEMINI_API_KEY || "",
+        GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID || "",
+        GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET || "",
         STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY || "",
         STRIPE_PRO_PRICE_ID: process.env.STRIPE_PRO_PRICE_ID || "",
         STRIPE_PRO_PLUS_PRICE_ID: process.env.STRIPE_PRO_PLUS_PRICE_ID || "",
