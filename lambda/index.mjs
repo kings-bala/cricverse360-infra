@@ -2494,21 +2494,40 @@ async function handleGetSubscription(event) {
 async function handleCreateCoachRequest(event, body) {
   const user = await getUserFromToken(event);
   if (!user) return respond(401, { error: "Unauthorized" });
-  const { coachId, message } = body;
+  const { coachId, message, name, email, phone, coachingGoal } = body;
   if (!coachId) return respond(400, { error: "coachId is required" });
   const userRow = await runSql("SELECT id FROM users WHERE email = :email", [
     { name: "email", value: { stringValue: user.email } },
   ]);
   const userId = parseRows(userRow)[0]?.id;
   if (!userId) return respond(404, { error: "User not found" });
+
+  // Ensure new columns exist
+  try {
+    await runSql("ALTER TABLE coach_requests ADD COLUMN requester_name VARCHAR(255)", []);
+  } catch { /* column may already exist */ }
+  try {
+    await runSql("ALTER TABLE coach_requests ADD COLUMN requester_email VARCHAR(255)", []);
+  } catch { /* column may already exist */ }
+  try {
+    await runSql("ALTER TABLE coach_requests ADD COLUMN requester_phone VARCHAR(50)", []);
+  } catch { /* column may already exist */ }
+  try {
+    await runSql("ALTER TABLE coach_requests ADD COLUMN coaching_goal VARCHAR(255)", []);
+  } catch { /* column may already exist */ }
+
   const id = crypto.randomUUID();
   await runSql(
-    "INSERT INTO coach_requests (id, user_id, coach_id, message) VALUES (:id, :uid, :cid, :msg)",
+    "INSERT INTO coach_requests (id, user_id, coach_id, message, requester_name, requester_email, requester_phone, coaching_goal) VALUES (:id, :uid, :cid, :msg, :rname, :remail, :rphone, :goal)",
     [
       { name: "id", value: { stringValue: id } },
       { name: "uid", value: { stringValue: userId } },
       { name: "cid", value: { stringValue: coachId } },
       { name: "msg", value: { stringValue: message || "" } },
+      { name: "rname", value: { stringValue: name || "" } },
+      { name: "remail", value: { stringValue: email || user.email } },
+      { name: "rphone", value: { stringValue: phone || "" } },
+      { name: "goal", value: { stringValue: coachingGoal || "" } },
     ]
   );
   return respond(201, { id, message: "Coach request submitted" });
