@@ -2137,7 +2137,7 @@ async function handleAIAnalysis(event, body) {
     { name: "uid", value: { stringValue: userId } },
   ]);
   const subRows = parseRows(sub);
-  const credits = subRows.length > 0 ? parseInt(subRows[0].analysis_credits || "0", 10) : 0;
+  const credits = subRows.length > 0 ? parseInt(subRows[0].analysis_credits || "0", 10) : 1;
   if (credits <= 0) {
     return respond(403, { error: "No analysis credits remaining", upgradeRequired: true });
   }
