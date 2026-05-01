@@ -1104,6 +1104,50 @@ async function handleAdminDashboard(event) {
   });
 }
 
+// ─── Admin Analytics Handler ───
+async function handleAdminAnalytics(event) {
+  const user = await getUserFromToken(event);
+  if (!user) return respond(401, { error: "Unauthorized" });
+  const dbUser = await runSql("SELECT role FROM users WHERE email = :email", [
+    { name: "email", value: { stringValue: user.email } },
+  ]);
+  const rows = parseRows(dbUser);
+  if (!rows.length || rows[0].role !== "admin") return respond(403, { error: "Admin access required" });
+
+  const [funnelCounts, recentEvents, dailyCounts] = await Promise.all([
+    runSql("SELECT event_name, COUNT(*) as count FROM analytics_events GROUP BY event_name ORDER BY count DESC"),
+    runSql("SELECT id, user_id, event_name, event_data, created_at FROM analytics_events ORDER BY created_at DESC LIMIT 50"),
+    runSql("SELECT DATE(created_at) as day, event_name, COUNT(*) as count FROM analytics_events WHERE created_at >= NOW() - INTERVAL '30 days' GROUP BY DATE(created_at), event_name ORDER BY day DESC"),
+  ]);
+
+  const funnelOrder = [
+    "landing_page_viewed", "sample_analysis_viewed", "signup_completed",
+    "video_uploaded", "analysis_completed", "report_viewed",
+    "paywall_viewed", "checkout_started", "purchase_completed",
+    "subscription_completed", "share_card_created", "share_card_shared",
+    "leaderboard_viewed", "coach_request_submitted"
+  ];
+
+  const countMap = {};
+  parseRows(funnelCounts).forEach(r => { countMap[r.event_name] = parseInt(r.count || "0", 10); });
+
+  const funnel = funnelOrder.map(name => ({
+    event: name,
+    count: countMap[name] || 0,
+  }));
+
+  const allEvents = {};
+  parseRows(funnelCounts).forEach(r => { allEvents[r.event_name] = parseInt(r.count || "0", 10); });
+
+  return respond(200, {
+    funnel,
+    allEvents,
+    recentEvents: parseRows(recentEvents),
+    dailyCounts: parseRows(dailyCounts),
+    totalEvents: Object.values(allEvents).reduce((a, b) => a + b, 0),
+  });
+}
+
 // ─── Catalog Route Handlers ───
 
 async function handleGetCatalog(category) {
@@ -2011,6 +2055,7 @@ async function handleStripeWebhook(event) {
       await runSql("UPDATE subscriptions SET analysis_credits = analysis_credits + 1, updated_at = NOW() WHERE user_id = :uid", [
         { name: "uid", value: { stringValue: userId } },
       ]);
+      await trackAnalyticsEvent(userId, "purchase_completed", { plan: "one_time", amount: 4.99 });
     } else {
       const credits = plan === "pro_plus" ? 15 : 5;
       await runSql(
@@ -2023,6 +2068,7 @@ async function handleStripeWebhook(event) {
           { name: "uid", value: { stringValue: userId } },
         ]
       );
+      await trackAnalyticsEvent(userId, "subscription_completed", { plan, credits });
     }
   } else if (type === "customer.subscription.updated" || type === "customer.subscription.deleted") {
     const subId = data.id;
@@ -2556,6 +2602,21 @@ async function handleGetCoaches() {
   return respond(200, parseRows(result));
 }
 
+// ─── Analytics Helpers ───
+async function trackAnalyticsEvent(userId, eventName, eventData = {}) {
+  try {
+    await runSql(
+      "INSERT INTO analytics_events (id, user_id, event_name, event_data) VALUES (:id, :uid, :name, :data::jsonb)",
+      [
+        { name: "id", value: { stringValue: crypto.randomUUID() } },
+        { name: "uid", value: { stringValue: userId || "" } },
+        { name: "name", value: { stringValue: eventName } },
+        { name: "data", value: { stringValue: JSON.stringify(eventData) } },
+      ]
+    );
+  } catch { /* non-critical */ }
+}
+
 // ─── Analytics Events Handler ───
 async function handleTrackEvent(event, body) {
   const { eventName, eventData, userId } = body;
@@ -2663,6 +2724,7 @@ export async function handler(event) {
     if (path === "/admin/users/{userId}/role" && method === "PUT") return await handleAdminChangeRole(event, body);
     if (path === "/admin/audit-log" && method === "GET") return await handleAuditLog(event);
     if (path === "/admin/dashboard" && method === "GET") return await handleAdminDashboard(event);
+    if (path === "/admin/analytics" && method === "GET") return await handleAdminAnalytics(event);
 
     // Feed routes
     if (path === "/feed/posts" && method === "GET") return await handleGetFeedPosts(event);
