@@ -45,16 +45,26 @@ function respond(statusCode, body) {
   };
 }
 
-async function runSql(sql, parameters = []) {
-  const cmd = new ExecuteStatementCommand({
-    resourceArn: DB_CLUSTER_ARN,
-    secretArn: DB_SECRET_ARN,
-    database: DB_NAME,
-    sql,
-    parameters,
-    includeResultMetadata: true,
-  });
-  return rds.send(cmd);
+async function runSql(sql, parameters = [], retries = 3) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const cmd = new ExecuteStatementCommand({
+        resourceArn: DB_CLUSTER_ARN,
+        secretArn: DB_SECRET_ARN,
+        database: DB_NAME,
+        sql,
+        parameters,
+        includeResultMetadata: true,
+      });
+      return await rds.send(cmd);
+    } catch (err) {
+      if (err.name === "DatabaseResumingException" && attempt < retries) {
+        await new Promise((r) => setTimeout(r, 3000 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 function parseRows(result) {
