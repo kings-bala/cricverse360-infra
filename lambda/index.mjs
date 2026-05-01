@@ -1121,11 +1121,12 @@ async function handleAdminAnalytics(event) {
   ]);
 
   const funnelOrder = [
-    "landing_page_viewed", "sample_analysis_viewed", "signup_completed",
-    "video_uploaded", "analysis_completed", "report_viewed",
-    "paywall_viewed", "checkout_started", "purchase_completed",
-    "subscription_completed", "share_card_created", "share_card_shared",
-    "leaderboard_viewed", "coach_request_submitted"
+    "landing_page_viewed", "hero_cta_clicked", "sample_analysis_viewed",
+    "upload_started", "video_uploaded", "analysis_started", "analysis_completed",
+    "report_viewed", "paywall_viewed", "unlock_clicked", "checkout_started",
+    "one_time_purchase_completed", "purchase_completed", "subscription_completed",
+    "share_prompt_viewed", "share_card_created", "share_card_downloaded", "share_card_shared",
+    "share_link_copied", "leaderboard_viewed", "profile_shared", "coach_request_submitted"
   ];
 
   const countMap = {};
@@ -2056,6 +2057,7 @@ async function handleStripeWebhook(event) {
         { name: "uid", value: { stringValue: userId } },
       ]);
       await trackAnalyticsEvent(userId, "purchase_completed", { plan: "one_time", amount: 4.99 });
+      await trackAnalyticsEvent(userId, "one_time_purchase_completed", { plan: "one_time", amount: 4.99 });
     } else {
       const credits = plan === "pro_plus" ? 15 : 5;
       await runSql(
