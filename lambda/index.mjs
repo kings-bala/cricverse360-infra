@@ -32,6 +32,66 @@ const USER_POOL_ID = process.env.USER_POOL_ID;
 const USER_POOL_CLIENT_ID = process.env.USER_POOL_CLIENT_ID;
 const BUCKET_NAME = process.env.BUCKET_NAME;
 
+// ─── Rate Limiting ───
+// In-memory sliding-window rate limiter. State resets on cold start, which is
+// acceptable at current scale. For multi-instance deployments, migrate to
+// DynamoDB or ElastiCache.
+const rateLimitStore = new Map(); // key -> { timestamps: number[] }
+
+const RATE_LIMITS = {
+  "/auth/login":           { maxRequests: 10, windowMs: 5 * 60 * 1000 },  // 10 per 5 min per IP
+  "/auth/register":        { maxRequests: 5,  windowMs: 60 * 60 * 1000 }, // 5 per hour per IP
+  "/auth/forgot-password": { maxRequests: 3,  windowMs: 60 * 60 * 1000 }, // 3 per hour per IP
+  "/auth/verify":          { maxRequests: 10, windowMs: 5 * 60 * 1000 },  // 10 per 5 min per IP
+  "/auth/reset-password":  { maxRequests: 5,  windowMs: 60 * 60 * 1000 }, // 5 per hour per IP
+};
+
+// Evict expired entries every 10 minutes to prevent memory leak.
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of rateLimitStore) {
+    entry.timestamps = entry.timestamps.filter((t) => now - t < 3600000);
+    if (entry.timestamps.length === 0) rateLimitStore.delete(key);
+  }
+}, 10 * 60 * 1000);
+
+function checkRateLimit(path, ip) {
+  const config = RATE_LIMITS[path];
+  if (!config) return null; // no limit configured for this path
+
+  const key = `${path}:${ip}`;
+  const now = Date.now();
+  const entry = rateLimitStore.get(key) || { timestamps: [] };
+
+  // Remove timestamps outside the window
+  entry.timestamps = entry.timestamps.filter((t) => now - t < config.windowMs);
+
+  if (entry.timestamps.length >= config.maxRequests) {
+    const oldestInWindow = entry.timestamps[0];
+    const retryAfterSec = Math.ceil((oldestInWindow + config.windowMs - now) / 1000);
+    console.log(`Rate limit hit: ${key} (${entry.timestamps.length}/${config.maxRequests})`);
+    return {
+      statusCode: 429,
+      headers: {
+        "Content-Type": "application/json",
+        "Retry-After": String(retryAfterSec),
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-User-Email,X-User-Name",
+        "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+      },
+      body: JSON.stringify({
+        error: "Too many requests. Please try again later.",
+        retryAfter: retryAfterSec,
+      }),
+    };
+  }
+
+  // Record this request
+  entry.timestamps.push(now);
+  rateLimitStore.set(key, entry);
+  return null; // not rate limited
+}
+
 function respond(statusCode, body) {
   return {
     statusCode,
@@ -3019,6 +3079,14 @@ export async function handler(event) {
 
   // Handle OPTIONS preflight
   if (method === "OPTIONS") return respond(200, {});
+
+  // Rate limiting on auth endpoints
+  const clientIp = event.requestContext?.identity?.sourceIp ||
+    event.headers?.["X-Forwarded-For"]?.split(",")[0]?.trim() || "unknown";
+  if (RATE_LIMITS[path] && method === "POST") {
+    const rateLimited = checkRateLimit(path, clientIp);
+    if (rateLimited) return rateLimited;
+  }
 
   try {
     // Auth routes
