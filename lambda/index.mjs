@@ -2173,6 +2173,57 @@ async function handleDrillVideoUpload(event, body) {
   return respond(200, { uploadUrl: url, key });
 }
 
+// ─── CSP Violation Reporting ───
+const cspReportCache = new Map(); // key → timestamp for hourly dedup
+const CSP_DEDUP_WINDOW_MS = 3600_000; // 1 hour
+
+function handleCspReport(body) {
+  try {
+    const report = body?.["csp-report"] || body;
+    if (!report) return respond(204, {});
+
+    const directive = report["violated-directive"] || report["effectiveDirective"] || "unknown";
+    const blockedUri = report["blocked-uri"] || report["blockedURL"] || "unknown";
+    const documentUri = report["document-uri"] || report["documentURL"] || "unknown";
+    const sourceFile = report["source-file"] || report["sourceFile"] || "";
+    const lineNumber = report["line-number"] || report["lineNumber"] || 0;
+
+    // Dedup key: same violation within 1 hour is ignored
+    const dedupKey = `${directive}|${blockedUri}|${documentUri}`;
+    const now = Date.now();
+    const lastSeen = cspReportCache.get(dedupKey);
+
+    if (lastSeen && (now - lastSeen) < CSP_DEDUP_WINDOW_MS) {
+      return respond(204, {});
+    }
+
+    cspReportCache.set(dedupKey, now);
+
+    // Prune old entries to prevent memory leak (keep max 1000)
+    if (cspReportCache.size > 1000) {
+      for (const [key, ts] of cspReportCache) {
+        if (now - ts > CSP_DEDUP_WINDOW_MS) cspReportCache.delete(key);
+      }
+    }
+
+    // Log to CloudWatch (structured JSON for easy querying)
+    console.log(JSON.stringify({
+      type: "CSP_VIOLATION",
+      directive,
+      blockedUri,
+      documentUri,
+      sourceFile,
+      lineNumber,
+      timestamp: new Date(now).toISOString(),
+    }));
+
+    return respond(204, {});
+  } catch (err) {
+    console.error("CSP report error:", err);
+    return respond(204, {}); // Never fail on CSP reports
+  }
+}
+
 // ─── Stripe Integration ───
 async function handleCreateCheckout(event, body) {
   const user = await getUserFromToken(event);
@@ -3079,6 +3130,9 @@ export async function handler(event) {
 
   // Handle OPTIONS preflight
   if (method === "OPTIONS") return respond(200, {});
+
+  // CSP violation reports (before rate limiting — browsers send these automatically)
+  if (path === "/csp-report" && method === "POST") return handleCspReport(body);
 
   // Rate limiting on auth endpoints
   const clientIp = event.requestContext?.identity?.sourceIp ||
