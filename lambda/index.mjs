@@ -2505,7 +2505,10 @@ async function handleAIAnalysis(event, body) {
       }
 
       // ─── Pre-flight guard: verify video contains cricket activity ───
-      if (videoParts.length > 0) {
+      // Feature flag: set AI_GUARD_ENABLED=true in Lambda env vars to activate.
+      // When disabled, analysis proceeds without the guard (pre-fix behavior).
+      const aiGuardEnabled = process.env.AI_GUARD_ENABLED === "true";
+      if (aiGuardEnabled && videoParts.length > 0) {
         const guardPrompt = `Look at this video carefully. Does it show a real person performing a cricket action (batting, bowling, or fielding)?
 
 Answer with ONLY a JSON object:
@@ -2690,7 +2693,7 @@ Tone:
         usedGemini = true;
 
         // Secondary confidence check: if Gemini returned very low confidence, reject
-        if (analysisResult.confidence_score !== undefined && analysisResult.confidence_score < 20) {
+        if (aiGuardEnabled && analysisResult.confidence_score !== undefined && analysisResult.confidence_score < 20) {
           await runSql("UPDATE videos SET status = 'rejected' WHERE id = :id", [
             { name: "id", value: { stringValue: videoId } },
           ]);
