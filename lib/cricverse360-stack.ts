@@ -121,6 +121,11 @@ export class CricVerse360Stack extends cdk.Stack {
       }
     );
 
+    // Enable PreventUserExistenceErrors so Cognito returns generic errors
+    // for UserNotFoundException, preventing user enumeration at the source.
+    const cfnClient = userPoolClient.node.defaultChild as cdk.aws_cognito.CfnUserPoolClient;
+    cfnClient.addPropertyOverride("PreventUserExistenceErrors", "ENABLED");
+
     // ─── S3 Bucket (profile pics, uploads) ───
     const bucket = new s3.Bucket(this, "CricVerse360Bucket", {
       bucketName: `cricverse360-assets-${this.account}`,
