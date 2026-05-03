@@ -2545,7 +2545,7 @@ Rules:
               ]);
               return respond(422, {
                 error: "not_cricket",
-                message: "We couldn't detect a cricket action in this video. Make sure you're visible in the frame and the video shows a cricket batting, bowling, or fielding action. Your credit has not been used.",
+                message: "We're having trouble analyzing this video. For best results, try side-angle footage with good lighting showing a clear cricket action. Your credit has not been used — try again with a different video, or contact support if this keeps happening.",
                 reason: guardResult.reason || "Video does not appear to contain cricket activity.",
               });
             }
@@ -2699,7 +2699,7 @@ Tone:
           ]);
           return respond(422, {
             error: "not_cricket",
-            message: "We couldn't detect a cricket action in this video. Make sure you're visible in the frame and the video shows a cricket batting, bowling, or fielding action. Your credit has not been used.",
+            message: "We're having trouble analyzing this video. For best results, try side-angle footage with good lighting showing a clear cricket action. Your credit has not been used — try again with a different video, or contact support if this keeps happening.",
             reason: "Analysis confidence too low — video may not contain recognizable cricket activity.",
           });
         }
