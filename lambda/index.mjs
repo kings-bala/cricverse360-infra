@@ -534,11 +534,13 @@ async function handleAuthRegister(body) {
 
   const regStart = Date.now();
   const MIN_RESPONSE_MS = 800;
+  const jitter = Math.floor(Math.random() * 200);
 
   async function padToFloor(response) {
+    const target = MIN_RESPONSE_MS + jitter;
     const elapsed = Date.now() - regStart;
-    if (elapsed < MIN_RESPONSE_MS) {
-      await new Promise((r) => setTimeout(r, MIN_RESPONSE_MS - elapsed));
+    if (elapsed < target) {
+      await new Promise((r) => setTimeout(r, target - elapsed));
     }
     return response;
   }
@@ -581,11 +583,13 @@ async function handleAuthLogin(body) {
 
   const loginStart = Date.now();
   const MIN_RESPONSE_MS = 800;
+  const jitter = Math.floor(Math.random() * 200);
 
   async function padToFloor(response) {
+    const target = MIN_RESPONSE_MS + jitter;
     const elapsed = Date.now() - loginStart;
-    if (elapsed < MIN_RESPONSE_MS) {
-      await new Promise((r) => setTimeout(r, MIN_RESPONSE_MS - elapsed));
+    if (elapsed < target) {
+      await new Promise((r) => setTimeout(r, target - elapsed));
     }
     return response;
   }
@@ -638,6 +642,7 @@ async function handleForgotPassword(body) {
 
   const fpStart = Date.now();
   const MIN_RESPONSE_MS = 800;
+  const jitter = Math.floor(Math.random() * 200);
 
   try {
     await cognito.send(new ForgotPasswordCommand({
@@ -650,9 +655,10 @@ async function handleForgotPassword(body) {
     console.log("ForgotPassword suppressed error:", err.name);
   }
 
+  const target = MIN_RESPONSE_MS + jitter;
   const elapsed = Date.now() - fpStart;
-  if (elapsed < MIN_RESPONSE_MS) {
-    await new Promise((r) => setTimeout(r, MIN_RESPONSE_MS - elapsed));
+  if (elapsed < target) {
+    await new Promise((r) => setTimeout(r, target - elapsed));
   }
   return respond(200, { message: "If an account exists with this email, a password reset code has been sent" });
 }
