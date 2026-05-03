@@ -533,7 +533,7 @@ async function handleAuthRegister(body) {
   }
 
   const regStart = Date.now();
-  const MIN_RESPONSE_MS = 600;
+  const MIN_RESPONSE_MS = 800;
 
   async function padToFloor(response) {
     const elapsed = Date.now() - regStart;
@@ -580,7 +580,7 @@ async function handleAuthLogin(body) {
   }
 
   const loginStart = Date.now();
-  const MIN_RESPONSE_MS = 600;
+  const MIN_RESPONSE_MS = 800;
 
   async function padToFloor(response) {
     const elapsed = Date.now() - loginStart;
@@ -637,7 +637,7 @@ async function handleForgotPassword(body) {
   if (!email) return respond(400, { error: "email is required" });
 
   const fpStart = Date.now();
-  const MIN_RESPONSE_MS = 600;
+  const MIN_RESPONSE_MS = 800;
 
   try {
     await cognito.send(new ForgotPasswordCommand({
