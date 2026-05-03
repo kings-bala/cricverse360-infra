@@ -531,6 +531,18 @@ async function handleAuthRegister(body) {
   if (!email || !password || !fullName) {
     return respond(400, { error: "email, password, and fullName are required" });
   }
+
+  const regStart = Date.now();
+  const MIN_RESPONSE_MS = 600;
+
+  async function padToFloor(response) {
+    const elapsed = Date.now() - regStart;
+    if (elapsed < MIN_RESPONSE_MS) {
+      await new Promise((r) => setTimeout(r, MIN_RESPONSE_MS - elapsed));
+    }
+    return response;
+  }
+
   try {
     await cognito.send(new SignUpCommand({
       ClientId: USER_POOL_CLIENT_ID,
@@ -552,15 +564,12 @@ async function handleAuthRegister(body) {
         { name: "role", value: { stringValue: role || "player" } },
       ]
     );
-    return respond(200, { message: "Registration successful. Please check your email to verify your account.", userId });
+    return await padToFloor(respond(200, { message: "Registration successful. Please check your email to verify your account.", userId }));
   } catch (err) {
     if (err.name === "UsernameExistsException") {
-      // Return a success-shaped response to prevent email enumeration.
-      // The real user won't get a duplicate account; the existing user
-      // won't receive any email, so there's no side-effect.
-      return respond(200, { message: "Registration successful. Please check your email to verify your account." });
+      return await padToFloor(respond(200, { message: "Registration successful. Please check your email to verify your account." }));
     }
-    return respond(500, { error: "An unexpected error occurred" });
+    return await padToFloor(respond(500, { error: "An unexpected error occurred" }));
   }
 }
 
@@ -569,7 +578,18 @@ async function handleAuthLogin(body) {
   if (!email || !password) {
     return respond(400, { error: "email and password are required" });
   }
+
   const loginStart = Date.now();
+  const MIN_RESPONSE_MS = 600;
+
+  async function padToFloor(response) {
+    const elapsed = Date.now() - loginStart;
+    if (elapsed < MIN_RESPONSE_MS) {
+      await new Promise((r) => setTimeout(r, MIN_RESPONSE_MS - elapsed));
+    }
+    return response;
+  }
+
   try {
     const result = await cognito.send(new InitiateAuthCommand({
       AuthFlow: "USER_PASSWORD_AUTH",
@@ -577,32 +597,23 @@ async function handleAuthLogin(body) {
       AuthParameters: { USERNAME: email, PASSWORD: password },
     }));
     const tokens = result.AuthenticationResult;
-    return respond(200, {
+    return await padToFloor(respond(200, {
       accessToken: tokens.AccessToken,
       refreshToken: tokens.RefreshToken,
       idToken: tokens.IdToken,
       expiresIn: tokens.ExpiresIn,
-    });
+    }));
   } catch (err) {
     if (err.name === "UserNotConfirmedException") {
-      return respond(403, { error: "Please verify your email first" });
-    }
-    // Normalize timing to prevent timing-based user enumeration.
-    // UserNotFoundException returns faster than NotAuthorizedException
-    // because Cognito skips the password check. We add a delay so both
-    // paths take roughly the same wall-clock time.
-    const elapsed = Date.now() - loginStart;
-    const minDelay = 200; // ms — approximate Cognito password-check time
-    if (elapsed < minDelay) {
-      await new Promise((r) => setTimeout(r, minDelay - elapsed));
+      return await padToFloor(respond(403, { error: "Please verify your email first" }));
     }
     if (
       err.name === "NotAuthorizedException" ||
       err.name === "UserNotFoundException"
     ) {
-      return respond(401, { error: "Invalid email or password" });
+      return await padToFloor(respond(401, { error: "Invalid email or password" }));
     }
-    return respond(500, { error: "An unexpected error occurred" });
+    return await padToFloor(respond(500, { error: "An unexpected error occurred" }));
   }
 }
 
@@ -624,6 +635,10 @@ async function handleAuthVerify(body) {
 async function handleForgotPassword(body) {
   const { email } = body;
   if (!email) return respond(400, { error: "email is required" });
+
+  const fpStart = Date.now();
+  const MIN_RESPONSE_MS = 600;
+
   try {
     await cognito.send(new ForgotPasswordCommand({
       ClientId: USER_POOL_CLIENT_ID,
@@ -633,6 +648,11 @@ async function handleForgotPassword(body) {
     // Swallow all errors (including UserNotFoundException) to prevent
     // email enumeration. Always return a success-shaped response.
     console.log("ForgotPassword suppressed error:", err.name);
+  }
+
+  const elapsed = Date.now() - fpStart;
+  if (elapsed < MIN_RESPONSE_MS) {
+    await new Promise((r) => setTimeout(r, MIN_RESPONSE_MS - elapsed));
   }
   return respond(200, { message: "If an account exists with this email, a password reset code has been sent" });
 }
