@@ -2504,6 +2504,55 @@ async function handleAIAnalysis(event, body) {
         }
       }
 
+      // ─── Pre-flight guard: verify video contains cricket activity ───
+      if (videoParts.length > 0) {
+        const guardPrompt = `Look at this video carefully. Does it show a real person performing a cricket action (batting, bowling, or fielding)?
+
+Answer with ONLY a JSON object:
+{"is_cricket": true/false, "reason": "one sentence explanation"}
+
+Rules:
+- A solid color, blank screen, static image, or non-sport video → false
+- A person doing yoga, walking, tennis, baseball, or any non-cricket activity → false
+- A person with a cricket bat, bowling a cricket ball, or fielding in a cricket context → true
+- Indoor nets, poor lighting, or unusual angles are still cricket if a cricket action is visible → true
+- Multiple people in frame where at least one is performing cricket → true`;
+
+        const guardRes = await fetch(geminiContentUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders },
+          body: JSON.stringify({
+            contents: [{ parts: [...videoParts, { text: guardPrompt }] }],
+            generationConfig: {
+              temperature: 0.1,
+              maxOutputTokens: 200,
+              responseMimeType: "application/json",
+            },
+          }),
+        });
+        const guardData = await guardRes.json();
+        const guardText = guardData.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (guardText) {
+          try {
+            const guardResult = JSON.parse(guardText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim());
+            if (guardResult.is_cricket === false) {
+              // Reset video status
+              await runSql("UPDATE videos SET status = 'rejected' WHERE id = :id", [
+                { name: "id", value: { stringValue: videoId } },
+              ]);
+              return respond(422, {
+                error: "not_cricket",
+                message: "We couldn't detect a cricket action in this video. Make sure you're visible in the frame and the video shows a cricket batting, bowling, or fielding action. Your credit has not been used.",
+                reason: guardResult.reason || "Video does not appear to contain cricket activity.",
+              });
+            }
+          } catch (guardParseErr) {
+            console.error("Guard prompt parse error:", guardParseErr, "Raw:", guardText);
+            // If guard parse fails, proceed with analysis (err on side of accepting)
+          }
+        }
+      }
+
       const prompt = `You are an expert cricket coach analyzing a real player's video.
 
 Your job is to give SPECIFIC, PRACTICAL, and ACTIONABLE feedback based ONLY on what is visible.
@@ -2524,7 +2573,7 @@ OUTPUT JSON ONLY.
 
 {
   "overall_score": 0-100,
-  "confidence_score": 0-100,
+  "confidence_score": 0-100,  // Set to 0-15 if the video does NOT show cricket. Set 50+ only if you can clearly identify cricket technique.
 
   "summary": "2-3 lines explaining how good the technique is",
 
@@ -2639,6 +2688,18 @@ Tone:
         const cleaned = content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
         analysisResult = JSON.parse(cleaned);
         usedGemini = true;
+
+        // Secondary confidence check: if Gemini returned very low confidence, reject
+        if (analysisResult.confidence_score !== undefined && analysisResult.confidence_score < 20) {
+          await runSql("UPDATE videos SET status = 'rejected' WHERE id = :id", [
+            { name: "id", value: { stringValue: videoId } },
+          ]);
+          return respond(422, {
+            error: "not_cricket",
+            message: "We couldn't detect a cricket action in this video. Make sure you're visible in the frame and the video shows a cricket batting, bowling, or fielding action. Your credit has not been used.",
+            reason: "Analysis confidence too low — video may not contain recognizable cricket activity.",
+          });
+        }
       } else {
         console.error("Gemini returned no content:", JSON.stringify(geminiData));
       }
