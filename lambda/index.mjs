@@ -40,6 +40,7 @@ const rateLimitStore = new Map(); // key -> { timestamps: number[] }
 
 const RATE_LIMITS = {
   "/auth/login":           { maxRequests: 10, windowMs: 5 * 60 * 1000 },  // 10 per 5 min per IP
+  "/auth/refresh":         { maxRequests: 30, windowMs: 5 * 60 * 1000 },  // 30 per 5 min per IP
   "/auth/register":        { maxRequests: 5,  windowMs: 60 * 60 * 1000 }, // 5 per hour per IP
   "/auth/forgot-password": { maxRequests: 3,  windowMs: 60 * 60 * 1000 }, // 3 per hour per IP
   "/auth/verify":          { maxRequests: 10, windowMs: 5 * 60 * 1000 },  // 10 per 5 min per IP
@@ -603,6 +604,29 @@ async function handleAuthLogin(body) {
       return respond(401, { error: "Invalid email or password" });
     }
     return respond(500, { error: "An unexpected error occurred" });
+  }
+}
+
+async function handleAuthRefresh(body) {
+  const { refreshToken } = body;
+  if (!refreshToken) return respond(400, { error: "refreshToken is required" });
+  try {
+    const result = await cognito.send(new InitiateAuthCommand({
+      AuthFlow: "REFRESH_TOKEN_AUTH",
+      ClientId: USER_POOL_CLIENT_ID,
+      AuthParameters: { REFRESH_TOKEN: refreshToken },
+    }));
+    const tokens = result.AuthenticationResult;
+    return respond(200, {
+      accessToken: tokens.AccessToken,
+      idToken: tokens.IdToken,
+      expiresIn: tokens.ExpiresIn,
+    });
+  } catch (err) {
+    if (err.name === "NotAuthorizedException") {
+      return respond(401, { error: "Refresh token expired or invalid" });
+    }
+    return respond(500, { error: "Token refresh failed" });
   }
 }
 
@@ -3146,6 +3170,7 @@ export async function handler(event) {
     // Auth routes
     if (path === "/auth/register" && method === "POST") return await handleAuthRegister(body);
     if (path === "/auth/login" && method === "POST") return await handleAuthLogin(body);
+    if (path === "/auth/refresh" && method === "POST") return await handleAuthRefresh(body);
     if (path === "/auth/verify" && method === "POST") return await handleAuthVerify(body);
     if (path === "/auth/forgot-password" && method === "POST") return await handleForgotPassword(body);
     if (path === "/auth/reset-password" && method === "POST") return await handleResetPassword(body);
